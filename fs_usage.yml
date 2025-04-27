@@ -1,0 +1,25 @@
+---
+- name: Check filesystem usage on ansible_node1
+  hosts: ansible_node1
+  tasks:
+    - name: Get filesystem usage
+      ansible.builtin.shell: df -h --output=source,fstype,used,avail,pcent,target
+      register: df_output
+      changed_when: false
+
+    - name: Display filesystem usage
+      ansible.builtin.debug:
+        msg: "{{ df_output.stdout_lines }}"
+
+    - name: Check if usage is above 80%
+      ansible.builtin.shell: df -h --output=pcent,target | grep -v Use | awk '{print $1}' | tr -d '%'
+      register: usage_percent
+      changed_when: false
+
+    - name: Alert if usage exceeds 80%
+      ansible.builtin.debug:
+        msg: "Warning: Filesystem {{ item }} usage is {{ usage_percent.stdout_lines[item_index|int] }}%!"
+      loop: "{{ df_output.stdout_lines[1:] | map('split') | map(attribute=5) | list }}"
+      loop_control:
+        index_var: item_index
+      when: usage_percent.stdout_lines[item_index|int] | int > 80
