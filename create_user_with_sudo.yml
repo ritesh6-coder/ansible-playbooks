@@ -1,0 +1,95 @@
+---
+- name: Manage user creation and sudo access
+  hosts: "{{ target_host | default('ansible_node1') }}"
+  gather_facts: yes
+  become: yes
+  vars:
+    user_password: "{{ lookup('password', '/dev/null length=16 chars=ascii_letters,digits,symbols') }}"
+  tasks:
+    - name: Get effective user running the job
+      ansible.builtin.command: whoami
+      register: whoami_result
+      changed_when: false
+    - name: Display user running the job
+      ansible.builtin.debug:
+        msg: "Job is running as user: {{ whoami_result.stdout }}"
+    - name: Get system uptime
+      ansible.builtin.command: uptime
+      register: uptime_result
+      changed_when: false
+    - name: Display uptime
+      ansible.builtin.debug:
+        msg: "Uptime: {{ uptime_result.stdout }}"
+    - name: Create user with provided username and generated password
+      ansible.builtin.user:
+        name: "{{ new_username }}"
+        password: "{{ user_password | password_hash('sha512') }}"
+        state: present
+        shell: /bin/bash
+      register: user_creation
+    - name: Display created username and password
+      ansible.builtin.debug:
+        msg:
+          - "Created user: {{ new_username }}"
+          - "Password: {{ user_password }} (Store this securely!)"
+      when: user_creation.changed
+    - name: Backup existing /etc/sudoers
+      ansible.builtin.copy:
+        src: /etc/sudoers
+        dest: /etc/sudoers.bak
+        remote_src: yes
+        backup: yes
+      when: user_creation.changed
+    - name: Add user to /etc/sudoers with root privileges
+      ansible.builtin.lineinfile:
+        path: /etc/sudoers
+        line: "{{ new_username }} ALL=(ALL) NOPASSWD:ALL"
+        validate: '/usr/sbin/visudo -cf %s'
+      when: user_creation.changed---
+- name: Manage user creation and sudo access
+  hosts: "{{ target_host | default('ansible_node1') }}"
+  gather_facts: yes
+  become: yes
+  vars:
+    user_password: "{{ lookup('password', '/dev/null length=16 chars=ascii_letters,digits,symbols') }}"
+  tasks:
+    - name: Get effective user running the job
+      ansible.builtin.command: whoami
+      register: whoami_result
+      changed_when: false
+    - name: Display user running the job
+      ansible.builtin.debug:
+        msg: "Job is running as user: {{ whoami_result.stdout }}"
+    - name: Get system uptime
+      ansible.builtin.command: uptime
+      register: uptime_result
+      changed_when: false
+    - name: Display uptime
+      ansible.builtin.debug:
+        msg: "Uptime: {{ uptime_result.stdout }}"
+    - name: Create user with provided username and generated password
+      ansible.builtin.user:
+        name: "{{ new_username }}"
+        password: "{{ user_password | password_hash('sha512') }}"
+        state: present
+        shell: /bin/bash
+      register: user_creation
+    - name: Display created username and password
+      ansible.builtin.debug:
+        msg:
+          - "Created user: {{ new_username }}"
+          - "Password: {{ user_password }} (Store this securely!)"
+      when: user_creation.changed
+    - name: Backup existing /etc/sudoers
+      ansible.builtin.copy:
+        src: /etc/sudoers
+        dest: /etc/sudoers.bak
+        remote_src: yes
+        backup: yes
+      when: user_creation.changed
+    - name: Add user to /etc/sudoers with root privileges
+      ansible.builtin.lineinfile:
+        path: /etc/sudoers
+        line: "{{ new_username }} ALL=(ALL) NOPASSWD:ALL"
+        validate: '/usr/sbin/visudo -cf %s'
+      when: user_creation.changed
