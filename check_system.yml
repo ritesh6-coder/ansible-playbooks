@@ -1,0 +1,22 @@
+---
+- name: Check system uptime and disk usage
+  hosts: ansible_node1
+  gather_facts: yes
+  tasks:
+    - name: Get system uptime
+      ansible.builtin.command: uptime
+      register: uptime_result
+      changed_when: false
+
+    - name: Display uptime
+      ansible.builtin.debug:
+        msg: "{{ uptime_result.stdout }}"
+
+    - name: Get disk usage
+      ansible.builtin.command: df -h
+      register: df_result
+      changed_when: false
+
+    - name: Display disk usage
+      ansible.builtin.debug:
+        msg: "{{ df_result.stdout_lines }}"
