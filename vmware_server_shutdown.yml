@@ -1,48 +1,57 @@
 ---
 - name: Check and shutdown ansible_node1 if reachable
   hosts: ansible_node1
+  gather_facts: false
   become: yes
-  gather_facts: no
 
   tasks:
-    - name: Ping the ansible_node1
+    - name: Test server connectivity with ping
       ansible.builtin.ping:
       register: ping_result
-      failed_when: ping_result.ping != "pong"
+      ignore_errors: true
 
-    - name: Display ping result
+    - name: Fail if server is unreachable
+      ansible.builtin.fail:
+        msg: "Server {{ inventory_hostname }} is unreachable!"
+      when: ping_result is failed or ping_result.ping is not defined or ping_result.ping != 'pong'
+
+    - name: Confirm that server is reachable
       ansible.builtin.debug:
-        msg: "ansible_node1 is reachable and will be shut down"
+        msg: "Server {{ inventory_hostname }} is reachable and responding to ping."
 
-    - name: Shutdown ansible_node1
+    - name: Shutdown the server
       ansible.builtin.command: shutdown -h now
       async: 45
       poll: 0
-      ignore_errors: true
-      when: ping_result.ping == "pong"
+      ignore_errors: yes
 
-    - name: Wait until ansible_node1 is down
+    - name: Wait for the server to shut down
       ansible.builtin.wait_for:
         host: "{{ inventory_hostname }}"
         port: 22
         state: stopped
         timeout: 300
       delegate_to: localhost
-      when: ping_result.ping == "pong"
 
-- name: Rename VM on Windows host via vmrun
-  hosts: windows_host
-  gather_facts: no
-
+- name: Rename the VM from the Windows host using vmrun
+  hosts: localhost
+  gather_facts: false
   vars:
-    vmx_path: "E:\\ansible_node1\\ansible node 1.vmx"
-    renamed_vmx_path: "E:\\ansible_node1\\ansible_node1_testing.vmx"
-    vmrun_path: '"C:\\Program Files (x86)\\VMware\\VMware Workstation\\vmrun.exe"'
+    vmware_vm_path: "E:\\ansible_node1\\ansible_node1.vmx"
+    new_vm_path: "E:\\ansible_node1\\servername_testing.vmx"
+    windows_host: "192.168.223.1"
+    windows_user: "administrator"
 
   tasks:
-    - name: Rename VM using vmrun
-      ansible.builtin.shell: >
-        {{ vmrun_path }} -T ws rename "{{ vmx_path }}" "{{ renamed_vmx_path }}"
-      args:
-        executable: cmd
+    - name: Rename the VM using vmrun
+      ansible.builtin.command: >
+        "C:\\Program Files (x86)\\VMware\\VMware Workstation\\vmrun.exe" -T ws rename "{{ vmware_vm_path }}" "{{ new_vm_path }}"
+      delegate_to: "{{ windows_host }}"
+      vars:
+        ansible_user: "{{ windows_user }}"
+        ansible_password: "{{ win_password }}"
+        ansible_connection: ssh
+        ansible_shell_type: cmd
+        ansible_port: 22
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
 
