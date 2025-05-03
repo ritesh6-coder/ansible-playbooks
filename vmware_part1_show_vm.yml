@@ -1,0 +1,24 @@
+---
+- name: Search for a VM in ESXi with dynamic inputs
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Search for the specified VM in ESXi
+      community.vmware.vmware_guest_info:
+        hostname: "{{ esxi_hostname }}"
+        username: "{{ esxi_username }}"
+        password: "{{ esxi_password }}"
+        validate_certs: false
+        name: "{{ vm_name }}"
+      delegate_to: localhost
+      register: vm_info
+
+    - name: Display VM information
+      ansible.builtin.debug:
+        var: vm_info.instance
+      when: vm_info.instance is defined
+
+    - name: Fail if VM is not found
+      ansible.builtin.fail:
+        msg: "VM '{{ vm_name }}' not found in ESXi host {{ esxi_hostname }}!"
+      when: vm_info.instance is not defined
