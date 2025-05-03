@@ -3,10 +3,24 @@
   hosts: localhost
   gather_facts: false
   tasks:
-    - name: Display installed collections
-      ansible.builtin.command: ansible-galaxy collection list community.vmware
-      register: collection_list
+    - name: Check for community.vmware collection in collection paths
+      ansible.builtin.find:
+        paths:
+          - /root/.ansible/collections/ansible_collections
+          - /usr/local/lib/python3.12/site-packages/ansible_collections
+          - /usr/share/ansible/collections/ansible_collections
+        patterns: "vmware"
+        file_type: directory
+        recurse: yes
+      register: collection_files
 
-    - name: Debug collection list
+    - name: Debug collection paths
       ansible.builtin.debug:
-        var: collection_list.stdout_lines
+        msg: "Found community.vmware at: {{ item.path }}"
+      loop: "{{ collection_files.files }}"
+      when: collection_files.matched > 0
+
+    - name: Fail if collection is not found
+      ansible.builtin.fail:
+        msg: "community.vmware collection not found in any of the specified paths!"
+      when: collection_files.matched == 0
