@@ -1,0 +1,13 @@
+---
+- name: Check if isolation is disabled
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Check if /root is accessible
+      ansible.builtin.stat:
+        path: /root
+      register: root_dir
+
+    - name: Debug root directory access
+      ansible.builtin.debug:
+        msg: "Can access /root: {{ root_dir.stat.exists }}"
