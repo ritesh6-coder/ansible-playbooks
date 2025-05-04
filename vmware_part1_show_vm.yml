@@ -3,7 +3,9 @@
   hosts: localhost
   gather_facts: no
   vars:
-    esxi_hostname: "192.168.223.131"  # Updated with your ESXi hostname
+    esxi_hostname: "192.168.223.131"
+    esxi_username: "{{ ansible_user | default('root') }}"
+    esxi_password: "{{ ansible_password | default('PotterHead@123') }}"
     vm_name: "{{ vm_name | default('test-vm') }}"
   tasks:
     - name: Search for the specified VM in ESXi
