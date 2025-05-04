@@ -2,31 +2,23 @@
 - name: Verify connection to ESXi vSphere
   hosts: localhost
   gather_facts: no
-
-  vars_prompt:
-    - name: "esxi_username"
-      prompt: "Enter ESXi username"
-      private: no
-    - name: "esxi_password"
-      prompt: "Enter ESXi password"
-      private: yes
-
+  environment:
+    ANSIBLE_COLLECTIONS_PATHS: "/var/lib/awx/.ansible/collections"
+  vars:
+    esxi_hostname: "192.168.223.131"
+    esxi_username: "{{ esxi_username | default('root') }}"
+    esxi_password: "{{ esxi_password | default('PotterHead@123') }}"
+    vm_name: "{{ vm_input | default('linux-test') }}"
   tasks:
     - name: Debug vm_name variable
       debug:
         var: vm_name
 
     - name: Check connectivity with ESXi server
-      community.vmware.vmware_vm_info:
-        hostname: "192.168.223.131"
-        username: "{{ esxi_username }}"
-        password: "{{ esxi_password }}"
-        port: 443
-        validate_certs: false
-        vm_name: "{{ vm_name | default('linux-test') }}"  # Ensure vm_name has a default
+      ansible.builtin.command: >
+        ansible localhost -m community.vmware.vmware_vm_info -a "hostname={{ esxi_hostname }} username={{ esxi_username }} password={{ esxi_password }} port=443 validate_certs=false vm_name={{ vm_name }}" -e "ANSIBLE_COLLECTIONS_PATHS=/var/lib/awx/.ansible/collections"
       register: vm_info
 
     - name: Debug VM info
       debug:
         var: vm_info
-
