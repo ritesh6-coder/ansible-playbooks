@@ -3,6 +3,15 @@
   hosts: localhost
   gather_facts: false
   tasks:
+    - name: Check if collection path exists
+      ansible.builtin.stat:
+        path: /var/lib/awx/.ansible/collections/ansible_collections/community/vmware
+      register: collection_path
+
+    - name: Debug collection path existence
+      ansible.builtin.debug:
+        msg: "Collection path /var/lib/awx/.ansible/collections/ansible_collections/community/vmware exists: {{ collection_path.stat.exists }}"
+
     - name: Check for community.vmware collection in collection paths
       ansible.builtin.find:
         paths:
