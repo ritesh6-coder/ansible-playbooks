@@ -4,10 +4,11 @@
   gather_facts: no
   environment:
     ANSIBLE_COLLECTIONS_PATHS: "/var/lib/awx/.ansible/collections"
+    PYTHONPATH: "/var/lib/awx/.ansible/collections/ansible_collections:/usr/lib/python3.6/site-packages"
   vars:
     esxi_hostname: "192.168.223.131"
-    esxi_username: "{{ esxi_username | default('root') }}"
-    esxi_password: "{{ esxi_password | default('PotterHead@123') }}"
+    esxi_username: "{{ ansible_user | default('root') }}"
+    esxi_password: "{{ ansible_password | default('PotterHead@123') }}"
     vm_name: "{{ vm_input | default('linux-test') }}"
   tasks:
     - name: Debug vm_name variable
@@ -16,7 +17,9 @@
 
     - name: Check connectivity with ESXi server
       ansible.builtin.command: >
-        ansible localhost -m community.vmware.vmware_vm_info -a "hostname={{ esxi_hostname }} username={{ esxi_username }} password={{ esxi_password }} port=443 validate_certs=false vm_name={{ vm_name }}" -e "ANSIBLE_COLLECTIONS_PATHS=/var/lib/awx/.ansible/collections"
+        python3 vmware_vm_info_script.py -j '{"hostname": "{{ esxi_hostname }}", "username": "{{ esxi_username }}", "password": "{{ esxi_password }}", "port": 443, "validate_certs": false, "vm_name": "{{ vm_name }}"}'
+      args:
+        chdir: "{{ playbook_dir }}"
       register: vm_info
 
     - name: Debug VM info
