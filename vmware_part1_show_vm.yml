@@ -3,7 +3,6 @@
   hosts: localhost
   gather_facts: no
   environment:
-    ANSIBLE_COLLECTIONS_PATHS: "/var/lib/awx/.ansible/collections"
     PYTHONPATH: "/var/lib/awx/.ansible/collections/ansible_collections:/usr/lib/python3.6/site-packages"
   vars:
     esxi_hostname: "192.168.223.131"

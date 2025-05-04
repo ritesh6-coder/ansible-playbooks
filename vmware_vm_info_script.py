@@ -1,8 +1,30 @@
 #!/usr/bin/python3
 import json
 import sys
-from ansible_collections.community.vmware.plugins.module_utils.vmware import connect_to_api, get_all_objs
+import os
+
+# Debugging: Print sys.path to see what Python is using
+print("sys.path before modification:", sys.path)
+
+# Add the collections path to sys.path (same path as in the container)
+collections_path = '/var/lib/awx/.ansible/collections/ansible_collections'
+if os.path.exists(collections_path):
+    sys.path.append(collections_path)
+    print(f"Added {collections_path} to sys.path")
+else:
+    print(f"Collections path {collections_path} does not exist")
+
+print("sys.path after modification:", sys.path)
+
+try:
+    from ansible_collections.community.vmware.plugins.module_utils.vmware import connect_to_api, get_all_objs
+except ImportError as e:
+    print(f"Failed to import ansible_collections: {e}")
+    sys.exit(1)
+
 from ansible.module_utils.basic import AnsibleModule
+from pyVim.connect import SmartConnect, Disconnect
+import vim
 
 def main():
     module = AnsibleModule(
