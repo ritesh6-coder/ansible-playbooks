@@ -1,24 +1,27 @@
 ---
-- name: Search for a VM in ESXi with dynamic inputs
+- name: Verify connection to ESXi vSphere
   hosts: localhost
   gather_facts: no
-  environment:
-    ANSIBLE_COLLECTIONS_PATHS: "/var/lib/awx/.ansible/collections"
-  vars:
-    esxi_hostname: "192.168.223.131"
-    esxi_username: "{{ ansible_user | default('root') }}"
-    esxi_password: "{{ ansible_password | default('PotterHead@123') }}"
-    vm_name: "{{ vm_name | default('linux-test') }}"
+
+  vars_prompt:
+    - name: "esxi_username"
+      prompt: "Enter ESXi username"
+      private: no
+    - name: "esxi_password"
+      prompt: "Enter ESXi password"
+      private: yes
+
   tasks:
-    - name: Search for the specified VM in ESXi
-      community.vmware.vmware_guest_find:
-        hostname: "{{ esxi_hostname }}"
+    - name: Check connectivity with ESXi server
+      community.vmware.vmware_vm_info:
+        hostname: "192.168.223.131"
         username: "{{ esxi_username }}"
         password: "{{ esxi_password }}"
-        validate_certs: no
-        name: "{{ vm_name }}"
+        port: 443
+        validate_certs: false
       register: vm_info
 
     - name: Debug VM info
-      ansible.builtin.debug:
+      debug:
         var: vm_info
+
