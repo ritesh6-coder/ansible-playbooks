@@ -6,7 +6,7 @@
     esxi_hostname: "192.168.223.131"
     esxi_username: "{{ ansible_user | default('root') }}"
     esxi_password: "{{ ansible_password | default('PotterHead@123') }}"
-    vm_name: "{{ vm_name | default('test-vm') }}"
+    vm_name: "{{ vm_name | default('linux-test') }}"
   tasks:
     - name: Search for the specified VM in ESXi
       community.vmware.vmware_guest_find:
