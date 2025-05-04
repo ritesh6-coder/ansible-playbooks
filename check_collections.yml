@@ -6,10 +6,9 @@
     - name: Check for community.vmware collection in collection paths
       ansible.builtin.find:
         paths:
+          - /var/lib/awx/.ansible/collections/ansible_collections
           - /root/.ansible/collections/ansible_collections
-          - /usr/local/lib/python3.12/site-packages/ansible_collections
           - /usr/share/ansible/collections/ansible_collections
-          - /tmp/bwrap_*/awx_*/project/collections/ansible_collections
         patterns: "vmware"
         file_type: directory
         recurse: yes
