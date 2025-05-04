@@ -12,6 +12,10 @@
       private: yes
 
   tasks:
+    - name: Debug vm_name variable
+      debug:
+        var: vm_name
+
     - name: Check connectivity with ESXi server
       community.vmware.vmware_vm_info:
         hostname: "192.168.223.131"
@@ -19,6 +23,7 @@
         password: "{{ esxi_password }}"
         port: 443
         validate_certs: false
+        vm_name: "{{ vm_name | default('linux-test') }}"  # Ensure vm_name has a default
       register: vm_info
 
     - name: Debug VM info
