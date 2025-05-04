@@ -2,6 +2,8 @@
 - name: Search for a VM in ESXi with dynamic inputs
   hosts: localhost
   gather_facts: no
+  environment:
+    ANSIBLE_COLLECTIONS_PATHS: "/var/lib/awx/.ansible/collections"
   vars:
     esxi_hostname: "192.168.223.131"
     esxi_username: "{{ ansible_user | default('root') }}"
