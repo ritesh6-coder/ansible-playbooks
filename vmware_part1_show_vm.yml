@@ -1,25 +1,47 @@
 ---
-- name: Verify connection to ESXi vSphere
+- name: Verify connection to ESXi vSphere using uri module
   hosts: localhost
   gather_facts: no
-  environment:
-    PYTHONPATH: "/var/lib/awx/.ansible/collections/ansible_collections:/usr/lib/python3.6/site-packages"
   vars:
     esxi_hostname: "192.168.223.131"
-    esxi_username: "{{ ansible_user | default('root') }}"
-    esxi_password: "{{ ansible_password | default('PotterHead@123') }}"
+    esxi_username: "{{ esxi_username }}"
+    esxi_password: "{{ esxi_password }}"
     vm_name: "{{ vm_input | default('linux-test') }}"
   tasks:
     - name: Debug vm_name variable
       debug:
         var: vm_name
 
-    - name: Check connectivity with ESXi server
-      ansible.builtin.command: >
-        python3 vmware_vm_info_script.py -j '{"hostname": "{{ esxi_hostname }}", "username": "{{ esxi_username }}", "password": "{{ esxi_password }}", "port": 443, "validate_certs": false, "vm_name": "{{ vm_name }}"}'
-      args:
-        chdir: "{{ playbook_dir }}"
-      register: vm_info
+    - name: Authenticate with ESXi server and get session token
+      ansible.builtin.uri:
+        url: "https://{{ esxi_hostname }}/rest/com/vmware/cis/session"
+        method: POST
+        user: "{{ esxi_username }}"
+        password: "{{ esxi_password }}"
+        force_basic_auth: yes
+        validate_certs: no
+        status_code: 200
+        return_content: yes
+      register: auth_response
+
+    - name: Extract session token
+      set_fact:
+        session_token: "{{ auth_response.json.value }}"
+
+    - name: Get VM information
+      ansible.builtin.uri:
+        url: "https://{{ esxi_hostname }}/rest/vcenter/vm"
+        method: GET
+        headers:
+          vmware-api-session-id: "{{ session_token }}"
+        validate_certs: no
+        status_code: 200
+        return_content: yes
+      register: vm_response
+
+    - name: Filter VM information for the specified VM
+      set_fact:
+        vm_info: "{{ vm_response.json.value | selectattr('name', 'equalto', vm_name) | list }}"
 
     - name: Debug VM info
       debug:
