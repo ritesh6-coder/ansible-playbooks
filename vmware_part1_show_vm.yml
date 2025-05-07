@@ -1,48 +1,27 @@
 ---
-- name: Verify connection to ESXi vSphere using uri module
+- name: Fetch and filter VM information from ESXi
   hosts: localhost
   gather_facts: no
   vars:
     esxi_hostname: "192.168.223.131"
-    esxi_username: "{{ esxi_username }}"
-    esxi_password: "{{ esxi_password }}"
-    vm_name: "{{ vm_input | default('linux-test') }}"
+    vmname: "{{ vm_input | default('linux-test') }}"
   tasks:
-    - name: Debug vm_name variable
-      debug:
-        var: vm_name
-
-    - name: Authenticate with ESXi server and get session token
-      ansible.builtin.uri:
-        url: "https://{{ esxi_hostname }}/rest/com/vmware/cis/session"
-        method: POST
-        user: "{{ esxi_username }}"
-        password: "{{ esxi_password }}"
-        force_basic_auth: yes
+    - name: Get VM information from ESXi
+      community.vmware.vmware_vm_info:
+        hostname: "{{ esxi_hostname }}"
+        username: "{{ lookup('env', 'VMWARE_USER') }}"
+        password: "{{ lookup('env', 'VMWARE_PASSWORD') }}"
         validate_certs: no
-        status_code: 200
-        return_content: yes
-      register: auth_response
+      register: all_vms
 
-    - name: Extract session token
+    - name: Find matching VM
       set_fact:
-        session_token: "{{ auth_response.json.value }}"
+        target_vm: "{{ all_vms.virtual_machines | selectattr('guest_name', 'equalto', vmname) | list | first }}"
 
-    - name: Get VM information
-      ansible.builtin.uri:
-        url: "https://{{ esxi_hostname }}/rest/vcenter/vm"
-        method: GET
-        headers:
-          vmware-api-session-id: "{{ session_token }}"
-        validate_certs: no
-        status_code: 200
-        return_content: yes
-      register: vm_response
-
-    - name: Filter VM information for the specified VM
-      set_fact:
-        vm_info: "{{ vm_response.json.value | selectattr('name', 'equalto', vm_name) | list }}"
-
-    - name: Debug VM info
+    - name: Debug - Print number of VMs found
       debug:
-        var: vm_info
+        msg: "Total VMs retrieved: {{ all_vms.virtual_machines | length }}"
+
+    - name: Debug - Print target VM info
+      debug:
+        var: target_vm
