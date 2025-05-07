@@ -1,0 +1,17 @@
+---
+- name: Fetch and filter VM information from ESXi
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Get VM information from ESXi
+      community.vmware.vmware_vm_info:
+        hostname: "{{ VMWARE_HOST }}"
+        username: "{{ VMWARE_USER }}"
+        password: "{{ VMWARE_PASSWORD }}"
+        validate_certs: "{{ VMWARE_VALIDATE_CERTS }}"
+      delegate_to: localhost
+      register: vms
+
+    - name: Debug - Print VM info
+      ansible.builtin.debug:
+        var: vms
