@@ -45,7 +45,7 @@
         path: /etc/sudoers
         line: "{{ new_username }} ALL=(ALL) NOPASSWD:ALL"
         validate: '/usr/sbin/visudo -cf %s'
-      when: user_creation.changed---
+      when: user_creation.changed
 - name: Manage user creation and sudo access
   hosts: "{{ target_host | default('ansible_node1') }}"
   gather_facts: yes
