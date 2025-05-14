@@ -1,0 +1,24 @@
+---
+- name: Rename a VM on standalone ESXi host
+  hosts: localhost
+  gather_facts: no
+  collections:
+    - community.vmware
+
+  vars:
+    esxi_hostname: "192.168.223.131"
+    esxi_username: "admin"
+    esxi_password: "redhat"
+    old_vm_name: "linux-test"
+    new_vm_name: "linux-renamed"
+
+  tasks:
+    - name: Rename the VM on ESXi
+      community.vmware.vm_rename:
+        hostname: "{{ esxi_hostname }}"
+        username: "{{ esxi_username }}"
+        password: "{{ esxi_password }}"
+        validate_certs: no
+        name: "{{ old_vm_name }}"
+        new_name: "{{ new_vm_name }}"
+      delegate_to: localhost
