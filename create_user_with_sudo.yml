@@ -93,3 +93,17 @@
         line: "{{ new_username }} ALL=(ALL) NOPASSWD:ALL"
         validate: '/usr/sbin/visudo -cf %s'
       when: user_creation.changed
+    
+    - name: Send job summary via Gmail
+  community.general.mail:
+    host: smtp.gmail.com
+    port: 587
+    username: "ritesh5919paul@gmail.com"
+    password: "msnx pvdl ukzd ebiy"
+    to: "ritesh5919paul@gmail.com"
+    subject: "Ansible Playbook Job Output - {{ inventory_hostname }}"
+    body: |
+      Playbook Job Output:
+
+      {{ ansible_job_output }}
+    secure: starttls
