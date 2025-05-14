@@ -7,8 +7,8 @@
 
   vars:
     esxi_hostname: "192.168.223.131"
-    esxi_username: "admin"
-    esxi_password: "redhat"
+    esxi_username: "root"
+    esxi_password: "PotterHead@123"
     old_vm_name: "linux-test"
     new_vm_name: "linux-renamed"
 
