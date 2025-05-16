@@ -1,24 +1,239 @@
 ---
-- name: Rename a VM on standalone ESXi host
+- name: Manage ESXi VM operations
   hosts: localhost
   gather_facts: no
-  collections:
-    - community.vmware
-
   vars:
-    esxi_hostname: "192.168.223.131"
-    esxi_username: "root"
-    esxi_password: "PotterHead@123"
-    old_vm_name: "linux-test"
-    new_vm_name: "linux-renamed"
+    esxi_hostname: "192. sì168.223.131"
+    vm_name: "linux-testmac"
+    new_vm_name: "linux-test-renamed"
+    validate_certs: false
+    vmware_username: "{{ vmware_username }}"
+    vmware_password: "{{ vmware_password }}"
 
   tasks:
-    - name: Rename the VM on ESXi
-      community.vmware.vm_rename:
+    - name: Debug credentials
+      ansible.builtin.debug:
+        msg: "Using username: {{ vmware_username }}, Host: {{ esxi_hostname }}"
+      when: debug_credentials | default(false) | bool
+
+    - name: Get information for the target VM from ESXi
+      community.vmware.vmware_vm_info:
         hostname: "{{ esxi_hostname }}"
-        username: "{{ esxi_username }}"
-        password: "{{ esxi_password }}"
-        validate_certs: no
-        name: "{{ old_vm_name }}"
-        new_name: "{{ new_vm_name }}"
+        username: "{{ vmware_username }}"
+        password: "{{ vmware_password }}"
+        validate_certs: "{{ validate_certs }}"
+        vm_name: "{{ vm_name }}"
       delegate_to: localhost
+      register: vms
+      retries: 3
+      delay: 5
+      until: vms is success
+
+    - name: Fail if VM does not exist
+      ansible.builtin.fail:
+        msg: "VM {{ vm_name }} not found"
+      when: vms.virtual_machines | selectattr('guest_name', 'equalto', vm_name) | list | length == 0
+
+    - name: Display the target VM details
+      ansible.builtin.debug:
+        msg: "Target VM: {{ vms.virtual_machines | selectattr('guest_name', 'equalto', vm_name) | map(attribute='guest_name') | list }}"
+
+    - name: Check if VMware Tools is running
+      community.vmware.vmware_guest_tools_info:
+        hostname: "{{ esxi_hostname }}"
+        username: "{{ vmware_username }}"
+        password: "{{ vmware_password }}"
+        validate_certs: "{{ validate_certs }}"
+        name_exact: "{{ vm_name }}"
+      delegate_to: localhost
+      register: tools_info
+      ignore_errors: true
+
+    - name: Debug VMware Tools info
+      ansible.builtin.debug:
+        var: tools_info
+      when: tools_info is defined
+
+    - name: Set VMware Tools status
+      ansible.builtin.set_fact:
+        tools_running: "{{ tools_info.guest_tools_status == 'guestToolsRunning' if tools_info.guest_tools_status is defined else false }}"
+
+    - name: Shutdown the target VM (if VMware Tools is running)
+      community.vmware.vmware_guest_powerstate:
+        hostname: "{{ esxi_hostname }}"
+        username: "{{ vmware_username }}"
+        password: "{{ vmware_password }}"
+        validate_certs: "{{ validate_certs }}"
+        name: "{{ vm_name }}"
+        state: shutdown-guest
+      delegate_to: localhost
+      register: shutdown_result
+      when: tools_running
+      retries: 3
+      delay: 5
+      until: shutdown_result is success
+
+    - name: Power off the target VM (if VMware Tools is not running)
+      community.vmware.vmware_guest_powerstate:
+        hostname: "{{ esxi_hostname }}"
+        username: "{{ vmware_username }}"
+        password: "{{ vmware_password }}"
+        validate_certs: "{{ validate_certs }}"
+        name: "{{ vm_name }}"
+        state: powered-off
+      delegate_to: localhost
+      register: poweroff_result
+      when: not tools_running
+      retries: 3
+      delay: 5
+      until: poweroff_result is success
+
+    - name: Wait for VM to power off
+      community.vmware.vmware_guest_powerstate:
+        hostname: "{{ esxi_hostname }}"
+        username: "{{ vmware_username }}"
+        password: "{{ vmware_password }}"
+        validate_certs: "{{ validate_certs }}"
+        name: "{{ vm_name }}"
+        state: powered-off
+      delegate_to: localhost
+      register: power_state
+      until: power_state.power_state == 'powered-off'
+      retries: 30
+      delay: 10
+      when: shutdown_result.changed or poweroff_result.changed
+
+    - name: Rename the target VM
+      community.vmware.vmware_guest:
+        hostname: "{{ esxi_hostname }}"
+        username: "{{ vmware_username }}"
+        password: "{{ vmware_password }}"
+        validate_certs: "{{ validate_certs }}"
+        name: "{{ vm_name }}"
+        new_name: "{{ new_vm_name }}"
+        state: present
+      delegate_to: localhost
+      register: rename_result
+      failed_when: rename_result.failed
+      retries: 3
+      delay: 5
+      until: rename_result is success---
+- name: Manage ESXi VM operations
+  hosts: localhost
+  gather_facts: no
+  vars:
+    esxi_hostname: "192. sì168.223.131"
+    vm_name: "linux-testmac"
+    new_vm_name: "linux-test-renamed"
+    validate_certs: false
+    vmware_username: "{{ vmware_username }}"
+    vmware_password: "{{ vmware_password }}"
+
+  tasks:
+    - name: Debug credentials
+      ansible.builtin.debug:
+        msg: "Using username: {{ vmware_username }}, Host: {{ esxi_hostname }}"
+      when: debug_credentials | default(false) | bool
+
+    - name: Get information for the target VM from ESXi
+      community.vmware.vmware_vm_info:
+        hostname: "{{ esxi_hostname }}"
+        username: "{{ vmware_username }}"
+        password: "{{ vmware_password }}"
+        validate_certs: "{{ validate_certs }}"
+        vm_name: "{{ vm_name }}"
+      delegate_to: localhost
+      register: vms
+      retries: 3
+      delay: 5
+      until: vms is success
+
+    - name: Fail if VM does not exist
+      ansible.builtin.fail:
+        msg: "VM {{ vm_name }} not found"
+      when: vms.virtual_machines | selectattr('guest_name', 'equalto', vm_name) | list | length == 0
+
+    - name: Display the target VM details
+      ansible.builtin.debug:
+        msg: "Target VM: {{ vms.virtual_machines | selectattr('guest_name', 'equalto', vm_name) | map(attribute='guest_name') | list }}"
+
+    - name: Check if VMware Tools is running
+      community.vmware.vmware_guest_tools_info:
+        hostname: "{{ esxi_hostname }}"
+        username: "{{ vmware_username }}"
+        password: "{{ vmware_password }}"
+        validate_certs: "{{ validate_certs }}"
+        name_exact: "{{ vm_name }}"
+      delegate_to: localhost
+      register: tools_info
+      ignore_errors: true
+
+    - name: Debug VMware Tools info
+      ansible.builtin.debug:
+        var: tools_info
+      when: tools_info is defined
+
+    - name: Set VMware Tools status
+      ansible.builtin.set_fact:
+        tools_running: "{{ tools_info.guest_tools_status == 'guestToolsRunning' if tools_info.guest_tools_status is defined else false }}"
+
+    - name: Shutdown the target VM (if VMware Tools is running)
+      community.vmware.vmware_guest_powerstate:
+        hostname: "{{ esxi_hostname }}"
+        username: "{{ vmware_username }}"
+        password: "{{ vmware_password }}"
+        validate_certs: "{{ validate_certs }}"
+        name: "{{ vm_name }}"
+        state: shutdown-guest
+      delegate_to: localhost
+      register: shutdown_result
+      when: tools_running
+      retries: 3
+      delay: 5
+      until: shutdown_result is success
+
+    - name: Power off the target VM (if VMware Tools is not running)
+      community.vmware.vmware_guest_powerstate:
+        hostname: "{{ esxi_hostname }}"
+        username: "{{ vmware_username }}"
+        password: "{{ vmware_password }}"
+        validate_certs: "{{ validate_certs }}"
+        name: "{{ vm_name }}"
+        state: powered-off
+      delegate_to: localhost
+      register: poweroff_result
+      when: not tools_running
+      retries: 3
+      delay: 5
+      until: poweroff_result is success
+
+    - name: Wait for VM to power off
+      community.vmware.vmware_guest_powerstate:
+        hostname: "{{ esxi_hostname }}"
+        username: "{{ vmware_username }}"
+        password: "{{ vmware_password }}"
+        validate_certs: "{{ validate_certs }}"
+        name: "{{ vm_name }}"
+        state: powered-off
+      delegate_to: localhost
+      register: power_state
+      until: power_state.power_state == 'powered-off'
+      retries: 30
+      delay: 10
+      when: shutdown_result.changed or poweroff_result.changed
+
+    - name: Rename the target VM
+      community.vmware.vmware_guest:
+        hostname: "{{ esxi_hostname }}"
+        username: "{{ vmware_username }}"
+        password: "{{ vmware_password }}"
+        validate_certs: "{{ validate_certs }}"
+        name: "{{ vm_name }}"
+        new_name: "{{ new_vm_name }}"
+        state: present
+      delegate_to: localhost
+      register: rename_result
+      failed_when: rename_result.failed
+      retries: 3
+      delay: 5
+      until: rename_result is success

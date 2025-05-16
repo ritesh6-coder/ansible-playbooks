@@ -1,0 +1,53 @@
+---
+- name: Manage ESXi VM operations
+  hosts: localhost
+  gather_facts: no
+  vars:
+    esxi_hostname: "192.168.223.131"
+    esxi_username: "root"
+    esxi_password: "PotterHead@123"
+    validate_certs: false
+    vm_name: "linux-test"
+    new_vm_name: "linux-test-renamed"
+
+  tasks:
+    - name: Get information for the target VM from ESXi
+      community.vmware.vmware_vm_info:
+        hostname: "{{ esxi_hostname }}"
+        username: "{{ esxi_username }}"
+        password: "{{ esxi_password }}"
+        validate_certs: "{{ validate_certs }}"
+        vm_name: "{{ vm_name }}"
+      delegate_to: localhost
+      register: vms
+
+    - name: Display the target VM details
+      ansible.builtin.debug:
+        msg: "Target VM: {{ vms.virtual_machines | selectattr('guest_name', 'equalto', vm_name) | map(attribute='guest_name') | list }}"
+
+    - name: Shutdown the target VM
+      community.vmware.vmware_guest_powerstate:
+        hostname: "{{ esxi_hostname }}"
+        username: "{{ esxi_username }}"
+        password: "{{ esxi_password }}"
+        validate_certs: "{{ validate_certs }}"
+        name: "{{ vm_name }}"
+        state: shutdown-guest
+      delegate_to: localhost
+      register: shutdown_result
+
+    - name: Wait for VM to power off
+      ansible.builtin.wait_for:
+        timeout: 300
+      when: shutdown_result.changed
+
+    - name: Rename the target VM
+      community.vmware.vmware_guest:
+        hostname: "{{ esxi_hostname }}"
+        username: "{{ esxi_username }}"
+        password: "{{ esxi_password }}"
+        validate_certs: "{{ validate_certs }}"
+        name: "{{ vm_name }}"
+        new_name: "{{ new_vm_name }}"
+        state: present
+      delegate_to: localhost

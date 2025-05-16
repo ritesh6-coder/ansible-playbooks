@@ -1,0 +1,96 @@
+---
+- name: Manage ESXi VM operations
+  hosts: localhost
+  gather_facts: no
+  vars:
+    esxi_hostname: "192.168.223.131"
+    esxi_username: "{{ vmware_username | default('root') }}"  # AWX injects or defaults
+    esxi_password: "{{ vmware_password }}"                   # AWX injects
+    validate_certs: false
+    vm_name: "linux-testmac"
+    new_vm_name: "linux-test-renamed"
+
+  tasks:
+    - name: Get information for the target VM from ESXi
+      community.vmware.vmware_vm_info:
+        hostname: "{{ esxi_hostname }}"
+        username: "{{ esxi_username }}"
+        password: "{{ esxi_password }}"
+        validate_certs: "{{ validate_certs }}"
+        vm_name: "{{ vm_name }}"
+      delegate_to: localhost
+      register: vms
+
+    - name: Fail if VM does not exist
+      ansible.builtin.fail:
+        msg: "VM {{ vm_name }} not found"
+      when: vms.virtual_machines | selectattr('guest_name', 'equalto', vm_name) | list | length == 0
+
+    - name: Display the target VM details
+      ansible.builtin.debug:
+        msg: "Target VM: {{ vms.virtual_machines | selectattr('guest_name', 'equalto', vm_name) | map(attribute='guest_name') | list }}"
+
+    - name: Check if VMware Tools is running
+      community.vmware.vmware_guest_tools_info:
+        hostname: "{{ esxi_hostname }}"
+        username: "{{ esxi_username }}"
+        password: "{{ esxi_password }}"
+        validate_certs: "{{ validate_certs }}"
+        name: "{{ vm_name }}"
+      delegate_to: localhost
+      register: tools_info
+      ignore_errors: true
+
+    - name: Debug VMware Tools info
+      ansible.builtin.debug:
+        var: tools_info
+      when: tools_info is defined
+
+    - name: Check VMware Tools status
+      ansible.builtin.set_fact:
+        tools_running: "{{ tools_info.guest_tools_status == 'running' if tools_info.guest_tools_status is defined else false }}"
+
+    - name: Fail if VMware Tools is not running
+      ansible.builtin.fail:
+        msg: "VMware Tools is not running on {{ vm_name }}"
+      when: not tools_running
+
+    - name: Shutdown the target VM
+      community.vmware.vmware_guest_powerstate:
+        hostname: "{{ esxi_hostname }}"
+        username: "{{ esxi_username }}"
+        password: "{{ esxi_password }}"
+        validate_certs: "{{ validate_certs }}"
+        name: "{{ vm_name }}"
+        state: shutdown-guest
+      delegate_to: localhost
+      register: shutdown_result
+      when: tools_running
+
+    - name: Wait for VM to power off
+      community.vmware.vmware_guest_powerstate:
+        hostname: "{{ esxi_hostname }}"
+        username: "{{ esxi_username }}"
+        password: "{{ esxi_password }}"
+        validate_certs: "{{ validate_certs }}"
+        name: "{{ vm_name }}"
+        state: powered-off
+      delegate_to: localhost
+      register: power_state
+      until: power_state.power_state == 'powered-off'
+      retries: 30
+      delay: 10
+      when: shutdown_result.changed
+
+    - name: Rename the target VM
+      community.vmware.vmware_guest:
+        hostname: "{{ esxi_hostname }}"
+        username: "{{ esxi_username }}"
+        password: "{{ esxi_password }}"
+        validate_certs: "{{ validate_certs }}"
+        name: "{{ vm_name }}"
+        new_name: "{{ new_vm_name }}"
+        state: present
+      delegate_to: localhost
+      register: rename_result
+      failed_when: rename_result.failed
