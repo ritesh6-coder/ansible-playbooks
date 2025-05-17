@@ -1,16 +1,14 @@
-# rename_vm_esxi.yml
 ---
 - name: Rename Virtual Machine on ESXi Host
   hosts: localhost
-  gather_facts: false
+  gathers_facts: false
   collections:
     - community.vmware
   vars:
-    esxi_host: "192.168.223.131"  # Replace with your ESXi host IP if different
+    esxi_host: "192.168.223.131"
     old_vm_name: "linux-testmac"
     new_vm_name: "linux-test-renamed"
     validate_certs: false
-    datacenter: "ha-datacenter"   # Default datacenter for standalone ESXi
 
   tasks:
     - name: Verify ESXi connection
@@ -49,7 +47,6 @@
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
-        datacenter: "{{ datacenter }}"  # Added required parameter
         name: "{{ old_vm_name }}"
       register: detailed_vm_info
       tags: power
@@ -60,15 +57,12 @@
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
-        datacenter: "{{ datacenter }}"  # Added required parameter
+        folder: "{{ detailed_vm_info.instance.hw_folder }}"
         name: "{{ old_vm_name }}"
         state: powered-off
-        state_change_timeout: 300
-        force: true
       register: power_action
-      when: (vm_info.virtual_machines | selectattr('guest_name', 'equalto', old_vm_name) | first).power_state == 'poweredOn'
+      when: detailed_vm_info.instance.power_state == 'poweredOn'
       tags: power
-      ignore_errors: true  # Prevents playbook failure if power-off fails
 
     - name: Rename VM
       vmware_guest:
@@ -76,10 +70,10 @@
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
-        datacenter: "{{ datacenter }}"  # Added required parameter
+        folder: "{{ detailed_vm_info.instance.hw_folder }}"
         name: "{{ old_vm_name }}"
         new_name: "{{ new_vm_name }}"
-      register: rename_result
+        state: present
       tags: rename
 
     - name: Restore power state if changed
@@ -88,10 +82,9 @@
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
-        datacenter: "{{ datacenter }}"  # Added required parameter
+        folder: "{{ detailed_vm_info.instance.hw_folder }}"
         name: "{{ new_vm_name }}"
         state: powered-on
-        state_change_timeout: 300
       when:
         - power_action is defined
         - power_action.changed
