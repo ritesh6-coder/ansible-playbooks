@@ -10,7 +10,6 @@
     old_vm_name: "linux-testmac"
     new_vm_name: "linux-test-renamed"
     validate_certs: false
-    datacenter: "ha-datacenter"  # Adjust if your datacenter name is different
 
   tasks:
     - name: Verify ESXi connection
@@ -49,24 +48,10 @@
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
-        datacenter: "{{ datacenter }}"
-        name: "{{ old_vm_name }}"
+        uuid: "{{ (vm_info.virtual_machines | selectattr('guest_name', 'equalto', old_vm_name) | first).uuid }}"
         state: powered-off
       register: power_action
       when: (vm_info.virtual_machines | selectattr('guest_name', 'equalto', old_vm_name) | first).power_state == 'poweredOn'
-      tags: power
-      ignore_errors: true  # Temporarily ignore errors to capture more details
-
-    - name: Debug power off failure
-      ansible.builtin.debug:
-        msg: "Power off failed: {{ power_action }}"
-      when: power_action.failed | default(false)
-      tags: power
-
-    - name: Fail if power off failed
-      ansible.builtin.fail:
-        msg: "Failed to power off VM: {{ power_action.msg | default('Unknown error') }}"
-      when: power_action.failed | default(false)
       tags: power
 
     - name: Rename VM
@@ -75,7 +60,7 @@
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
-        datacenter: "{{ datacenter }}"
+        uuid: "{{ (vm_info.virtual_machines | selectattr('guest_name', 'equalto', old_vm_name) | first).uuid }}"
         name: "{{ old_vm_name }}"
         new_name: "{{ new_vm_name }}"
       register: rename_result
@@ -92,8 +77,7 @@
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
-        datacenter: "{{ datacenter }}"
-        name: "{{ new_vm_name }}"
+        uuid: "{{ (vm_info.virtual_machines | selectattr('guest_name', 'equalto', new_vm_name) | first).uuid }}"
         state: powered-on
       when:
         - power_action is defined
