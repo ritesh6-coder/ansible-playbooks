@@ -1,63 +1,193 @@
 ---
 - name: Rename Virtual Machine on ESXi Host
   hosts: localhost
+  connection: local
   gather_facts: false
   collections:
     - community.vmware
   vars:
-    esxi_host: "192.168.223.131"  # Replace with your ESXi host IP if different
+    esxi_host: "192.168.223.131"
     old_vm_name: "linux-testmac"
     new_vm_name: "linux-test-renamed"
     validate_certs: false
+    datacenter: "ha-datacenter"
 
   tasks:
-    - name: Get VM info
-      community.vmware.vmware_vm_info:
+    - name: Verify ESXi connection
+      vmware_vm_info:
+        hostname: "{{ esxi_host }}"
+        username: "{{ vault_esxi_user }}"
+        password: "{{ vault_esxi_pass }}"
+        validate_certs: "{{ validate_certs }}"
+      register: connection_test
+      tags: always
+
+    - name: Fail if connection failed
+      ansible.builtin.fail:
+        msg: "Failed to connect to ESXi host: {{ connection_test.msg | default('Unknown error') }}"
+      when: connection_test.failed | default(false)
+      tags: always
+
+    - name: Get current VM info
+      vmware_vm_info:
         hostname: "{{ esxi_host }}"
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
       register: vm_info
-      tags: always
+      tags: info
 
-    - name: Fail if VM not found
+    - name: Ensure VM exists
       ansible.builtin.fail:
         msg: "VM '{{ old_vm_name }}' not found on {{ esxi_host }}"
       when: not (vm_info.virtual_machines | selectattr('guest_name', 'equalto', old_vm_name) | list)
       tags: check
 
-    - name: Set VM folder
-      set_fact:
-        vm_folder: "{{ (vm_info.virtual_machines | selectattr('guest_name', 'equalto', old_vm_name) | first).hw_folder }}"
+    - name: Get detailed VM state
+      vmware_guest_info:
+        hostname: "{{ esxi_host }}"
+        username: "{{ vault_esxi_user }}"
+        password: "{{ vault_esxi_pass }}"
+        validate_certs: "{{ validate_certs }}"
+        datacenter: "{{ datacenter }}"
+        name: "{{ old_vm_name }}"
+      register: detailed_vm_info
+      tags: power
 
     - name: Power off VM if running
-      community.vmware.vmware_guest_powerstate:
+      vmware_guest_powerstate:
         hostname: "{{ esxi_host }}"
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
-        folder: "{{ vm_folder }}"
+        datacenter: "{{ datacenter }}"
+        folder: "{{ detailed_vm_info.instance.hw_folder }}"
         name: "{{ old_vm_name }}"
         state: powered-off
-      when: (vm_info.virtual_machines | selectattr('guest_name', 'equalto', old_vm_name) | first).power_state == 'poweredOn'
+      register: power_action
+      when: detailed_vm_info.instance.power_state == 'poweredOn'
+      tags: power
 
     - name: Rename VM
-      community.vmware.vmware_guest:
+      vmware_guest:
         hostname: "{{ esxi_host }}"
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
-        folder: "{{ vm_folder }}"
+        datacenter: "{{ datacenter }}"
+        folder: "{{ detailed_vm_info.instance.hw_folder }}"
         name: "{{ old_vm_name }}"
         new_name: "{{ new_vm_name }}"
+        state: present
+      tags: rename
 
     - name: Restore power state if changed
-      community.vmware.vmware_guest_powerstate:
+      vmware_guest_powerstate:
         hostname: "{{ esxi_host }}"
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
-        folder: "{{ vm_folder }}"
+        datacenter: "{{ datacenter }}"
+        folder: "{{ detailed_vm_info.instance.hw_folder }}"
         name: "{{ new_vm_name }}"
         state: powered-on
-      when: (vm_info.virtual_machines | selectattr('guest_name', 'equalto', old_vm_name) | first).power_state == 'poweredOn'
+      when:
+        - power_action is defined
+        - power_action.changed
+      tags: power---
+- name: Rename Virtual Machine on ESXi Host
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - community.vmware
+  vars:
+    esxi_host: "192.168.223.131"
+    old_vm_name: "linux-testmac"
+    new_vm_name: "linux-test-renamed"
+    validate_certs: false
+    datacenter: "ha-datacenter"
+
+  tasks:
+    - name: Verify ESXi connection
+      vmware_vm_info:
+        hostname: "{{ esxi_host }}"
+        username: "{{ vault_esxi_user }}"
+        password: "{{ vault_esxi_pass }}"
+        validate_certs: "{{ validate_certs }}"
+      register: connection_test
+      tags: always
+
+    - name: Fail if connection failed
+      ansible.builtin.fail:
+        msg: "Failed to connect to ESXi host: {{ connection_test.msg | default('Unknown error') }}"
+      when: connection_test.failed | default(false)
+      tags: always
+
+    - name: Get current VM info
+      vmware_vm_info:
+        hostname: "{{ esxi_host }}"
+        username: "{{ vault_esxi_user }}"
+        password: "{{ vault_esxi_pass }}"
+        validate_certs: "{{ validate_certs }}"
+      register: vm_info
+      tags: info
+
+    - name: Ensure VM exists
+      ansible.builtin.fail:
+        msg: "VM '{{ old_vm_name }}' not found on {{ esxi_host }}"
+      when: not (vm_info.virtual_machines | selectattr('guest_name', 'equalto', old_vm_name) | list)
+      tags: check
+
+    - name: Get detailed VM state
+      vmware_guest_info:
+        hostname: "{{ esxi_host }}"
+        username: "{{ vault_esxi_user }}"
+        password: "{{ vault_esxi_pass }}"
+        validate_certs: "{{ validate_certs }}"
+        datacenter: "{{ datacenter }}"
+        name: "{{ old_vm_name }}"
+      register: detailed_vm_info
+      tags: power
+
+    - name: Power off VM if running
+      vmware_guest_powerstate:
+        hostname: "{{ esxi_host }}"
+        username: "{{ vault_esxi_user }}"
+        password: "{{ vault_esxi_pass }}"
+        validate_certs: "{{ validate_certs }}"
+        datacenter: "{{ datacenter }}"
+        folder: "{{ detailed_vm_info.instance.hw_folder }}"
+        name: "{{ old_vm_name }}"
+        state: powered-off
+      register: power_action
+      when: detailed_vm_info.instance.power_state == 'poweredOn'
+      tags: power
+
+    - name: Rename VM
+      vmware_guest:
+        hostname: "{{ esxi_host }}"
+        username: "{{ vault_esxi_user }}"
+        password: "{{ vault_esxi_pass }}"
+        validate_certs: "{{ validate_certs }}"
+        datacenter: "{{ datacenter }}"
+        folder: "{{ detailed_vm_info.instance.hw_folder }}"
+        name: "{{ old_vm_name }}"
+        new_name: "{{ new_vm_name }}"
+        state: present
+      tags: rename
+
+    - name: Restore power state if changed
+      vmware_guest_powerstate:
+        hostname: "{{ esxi_host }}"
+        username: "{{ vault_esxi_user }}"
+        password: "{{ vault_esxi_pass }}"
+        validate_certs: "{{ validate_certs }}"
+        datacenter: "{{ datacenter }}"
+        folder: "{{ detailed_vm_info.instance.hw_folder }}"
+        name: "{{ new_vm_name }}"
+        state: powered-on
+      when:
+        - power_action is defined
+        - power_action.changed
+      tags: power
