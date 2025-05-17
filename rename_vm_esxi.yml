@@ -23,8 +23,8 @@
 
     - name: Fail if connection failed
       ansible.builtin.fail:
-        msg: "Failed to connect to ESXi host: {{ connection_test.msg }}"
-      when: connection_test.failed
+        msg: "Failed to connect to ESXi host: {{ connection_test.msg | default('Unknown error') }}"
+      when: connection_test.failed | default(false)
       tags: always
 
     - name: Get current VM info
@@ -79,7 +79,7 @@
         validate_certs: "{{ validate_certs }}"
         name: "{{ new_vm_name }}"
         state: powered-on
-      when: 
+      when:
         - power_action is defined
         - power_action.changed
       tags: power
