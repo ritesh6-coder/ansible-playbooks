@@ -5,7 +5,7 @@
   collections:
     - community.vmware
   vars:
-    esxi_host: "192.168.223.131"  # Replace with your ESXi host IP
+    esxi_host: "192.168.223.131"  # Replace with your ESXi host IP if different
     old_vm_name: "linux-testmac"
     new_vm_name: "linux-test-renamed"
     validate_certs: false
@@ -26,18 +26,20 @@
       when: not (vm_info.virtual_machines | selectattr('guest_name', 'equalto', old_vm_name) | list)
       tags: check
 
+    - name: Set VM folder
+      set_fact:
+        vm_folder: "{{ (vm_info.virtual_machines | selectattr('guest_name', 'equalto', old_vm_name) | first).hw_folder }}"
+
     - name: Power off VM if running
       community.vmware.vmware_guest_powerstate:
         hostname: "{{ esxi_host }}"
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
+        folder: "{{ vm_folder }}"
         name: "{{ old_vm_name }}"
         state: powered-off
-        state_change_timeout: 300  # Wait up to 5 minutes for power-off
-      register: power_action
       when: (vm_info.virtual_machines | selectattr('guest_name', 'equalto', old_vm_name) | first).power_state == 'poweredOn'
-      tags: power
 
     - name: Rename VM
       community.vmware.vmware_guest:
@@ -45,9 +47,9 @@
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
+        folder: "{{ vm_folder }}"
         name: "{{ old_vm_name }}"
         new_name: "{{ new_vm_name }}"
-      tags: rename
 
     - name: Restore power state if changed
       community.vmware.vmware_guest_powerstate:
@@ -55,10 +57,7 @@
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
+        folder: "{{ vm_folder }}"
         name: "{{ new_vm_name }}"
         state: powered-on
-        state_change_timeout: 300  # Wait up to 5 minutes for power-on
-      when:
-        - power_action is defined
-        - power_action.changed
-      tags: power
+      when: (vm_info.virtual_machines | selectattr('guest_name', 'equalto', old_vm_name) | first).power_state == 'poweredOn'
