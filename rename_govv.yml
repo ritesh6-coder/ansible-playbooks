@@ -1,0 +1,18 @@
+- name: Rename VM using govc
+  hosts: localhost
+  vars:
+    govc_url: 'https://192.168.223.131'
+    govc_user: 'root'
+    govc_pass: 'PotterHead@123'
+    old_vm: 'linux-test'
+    new_vm: 'linux-test2-rename'
+
+  tasks:
+    - name: Rename VM
+      shell: |
+        export GOVC_URL={{ govc_url }}
+        export GOVC_USERNAME={{ govc_user }}
+        export GOVC_PASSWORD={{ govc_pass }}
+        export GOVC_INSECURE=1
+        govc vm.change -vm "{{ old_vm }}" -name "{{ new_vm }}"
+

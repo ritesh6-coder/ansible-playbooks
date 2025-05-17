@@ -1,0 +1,273 @@
+---
+- name: Manage VM on ESXi (List, Power On, Rename via SSH)
+  hosts: localhost
+  gather_facts: no
+  vars:
+    esxi_hostname: "{{ esxi_hostname | default('192.168.223.131') }}"
+    esxi_username: "{{ esxi_username }}"
+    esxi_password: "{{ esxi_password }}"
+    validate_certs: "{{ validate_certs | default(false) | bool }}"
+    vm_name: "{{ vm_name | default('linux-testmac') }}"
+    new_vm_name: "{{ new_vm_name | default('linux-testmac2') }}"
+
+  tasks:
+    - name: Verify required tools are installed on the Ansible host
+      ansible.builtin.command: "which sshpass"
+      register: sshpass_check
+      failed_when: sshpass_check.rc != 0
+      changed_when: false
+
+    - name: List all VMs on ESXi
+      community.vmware.vmware_vm_info:
+        hostname: "{{ esxi_hostname }}"
+        username: "{{ esxi_username }}"
+        password: "{{ esxi_password }}"
+        validate_certs: "{{ validate_certs }}"
+      delegate_to: localhost
+      register: vms
+
+    - name: Display all VMs
+      ansible.builtin.debug:
+        msg: "VMs on ESXi: {{ vms.virtual_machines | map(attribute='guest_name') | list }}"
+
+    - name: Fail if the target VM is not found
+      ansible.builtin.fail:
+        msg: "VM {{ vm_name }} not found on ESXi host."
+      when: vms.virtual_machines | selectattr('guest_name', 'equalto', vm_name) | list | length == 0
+
+    - name: Get the VM ID
+      ansible.builtin.set_fact:
+        vm_id: "{{ (vms.virtual_machines | selectattr('guest_name', 'equalto', vm_name) | first).moid }}"
+
+    - name: Get the VM's disk path
+      ansible.builtin.set_fact:
+        vm_disk_path: "{{ (vms.virtual_machines | selectattr('guest_name', 'equalto', vm_name) | first).datastore_url[0].url }}"
+
+    - name: Check if the VM directory exists
+      ansible.builtin.command:
+        cmd: "sshpass -p '{{ esxi_password }}' ssh -o StrictHostKeyChecking=no {{ esxi_username }}@{{ esxi_hostname }} 'ls -d {{ vm_disk_path }}{{ vm_name }}'"
+      register: dir_check
+      failed_when: dir_check.rc != 0
+      changed_when: false
+
+    - name: Check if the new VM directory already exists
+      ansible.builtin.command:
+        cmd: "sshpass -p '{{ esxi_password }}' ssh -o StrictHostKeyChecking=no {{ esxi_username }}@{{ esxi_hostname }} 'ls -d {{ vm_disk_path }}{{ new_vm_name }}'"
+      register: new_dir_check
+      failed_when: new_dir_check.rc == 0
+      ignore_errors: true
+      changed_when: false
+
+    - name: Check the power state of the VM
+      ansible.builtin.command:
+        cmd: "sshpass -p '{{ esxi_password }}' ssh -o StrictHostKeyChecking=no {{ esxi_username }}@{{ esxi_hostname }} 'vim-cmd vmsvc/get.summary {{ vm_id }}'"
+      register: power_state_check
+      changed_when: false
+
+    - name: Power on the target VM via SSH (if powered off)
+      ansible.builtin.command:
+        cmd: "sshpass -p '{{ esxi_password }}' ssh -o StrictHostKeyChecking=no {{ esxi_username }}@{{ esxi_hostname }} 'vim-cmd vmsvc/power.on {{ vm_id }}'"
+      register: power_on_result
+      changed_when: power_on_result.rc == 0
+      when: "'poweredOff' in power_state_check.stdout"
+
+    - name: Wait for the VM to power on (if powered on)
+      ansible.builtin.command:
+        cmd: "sshpass -p '{{ esxi_password }}' ssh -o StrictHostKeyChecking=no {{ esxi_username }}@{{ esxi_hostname }} 'vim-cmd vmsvc/get.summary {{ vm_id }}'"
+      register: power_state
+      until: "'poweredOn' in power_state.stdout"
+      retries: 30
+      delay: 10
+      when: power_on_result.changed | default(false)
+
+    - name: Power off the target VM for renaming via SSH
+      ansible.builtin.command:
+        cmd: "sshpass -p '{{ esxi_password }}' ssh -o StrictHostKeyChecking=no {{ esxi_username }}@{{ esxi_hostname }} 'vim-cmd vmsvc/power.off {{ vm_id }}'"
+      register: power_off_result
+      changed_when: power_off_result.rc == 0
+      when: "'poweredOn' in power_state_check.stdout or power_on_result.changed | default(false)"
+
+    - name: Wait for the VM to power off
+      ansible.builtin.command:
+        cmd: "sshpass -p '{{ esxi_password }}' ssh -o StrictHostKeyChecking=no {{ esxi_username }}@{{ esxi_hostname }} 'vim-cmd vmsvc/get.summary {{ vm_id }}'"
+      register: power_state
+      until: "'poweredOff' in power_state.stdout"
+      retries: 30
+      delay: 10
+      when: power_off_result.changed | default(false)
+
+    - name: Unregister the VM
+      ansible.builtin.command:
+        cmd: "sshpass -p '{{ esxi_password }}' ssh -o StrictHostKeyChecking=no {{ esxi_username }}@{{ esxi_hostname }} 'vim-cmd vmsvc/unregister {{ vm_id }}'"
+      register: unregister_result
+      changed_when: unregister_result.rc == 0
+
+    - name: Rename the VM directory on the datastore
+      ansible.builtin.command:
+        cmd: "sshpass -p '{{ esxi_password }}' ssh -o StrictHostKeyChecking=no {{ esxi_username }}@{{ esxi_hostname }} 'mv {{ vm_disk_path }}{{ vm_name }} {{ vm_disk_path }}{{ new_vm_name }}'"
+      register: rename_result
+      changed_when: rename_result.rc == 0
+
+    - name: Rename the VM files (e.g., .vmx, .vmdk)
+      ansible.builtin.command:
+        cmd: "sshpass -p '{{ esxi_password }}' ssh -o StrictHostKeyChecking=no {{ esxi_username }}@{{ esxi_hostname }} 'find {{ vm_disk_path }}{{ new_vm_name }} -type f -name \"*{{ vm_name }}*\" -exec sh -c \"mv {} {{ vm_disk_path }}{{ new_vm_name }}/\$(basename {} | sed s/{{ vm_name }}/{{ new_vm_name }}/g)\" \\;'"
+      register: rename_files_result
+      changed_when: rename_files_result.rc == 0
+
+    - name: Update the .vmx file to reflect the new name
+      ansible.builtin.command:
+        cmd: "sshpass -p '{{ esxi_password }}' ssh -o StrictHostKeyChecking=no {{ esxi_username }}@{{ esxi_hostname }} 'sed -i \"s/{{ vm_name }}/{{ new_vm_name }}/g\" {{ vm_disk_path }}{{ new_vm_name }}/{{ new_vm_name }}.vmx'"
+      register: update_vmx_result
+      changed_when: update_vmx_result.rc == 0
+
+    - name: Register the VM with the new name
+      ansible.builtin.command:
+        cmd: "sshpass -p '{{ esxi_password }}' ssh -o StrictHostKeyChecking=no {{ esxi_username }}@{{ esxi_hostname }} 'vim-cmd solo/registervm {{ vm_disk_path }}{{ new_vm_name }}/{{ new_vm_name }}.vmx'"
+      register: register_result
+      changed_when: register_result.rc == 0
+
+    - name: Verify the VM is registered with the new name
+      ansible.builtin.command:
+        cmd: "sshpass -p '{{ esxi_password }}' ssh -o StrictHostKeyChecking=no {{ esxi_username }}@{{ esxi_hostname }} 'vim-cmd vmsvc/getallvms'"
+      register: final_vm_list
+      changed_when: false
+
+    - name: Display final VM list
+      ansible.builtin.debug:
+        msg: "Final VM list: {{ final_vm_list.stdout_lines }}"---
+- name: Manage VM on ESXi (List, Power On, Rename via SSH)
+  hosts: localhost
+  gather_facts: no
+  vars:
+    esxi_hostname: "{{ esxi_hostname | default('192.168.223.131') }}"
+    esxi_username: "{{ esxi_username }}"
+    esxi_password: "{{ esxi_password }}"
+    validate_certs: "{{ validate_certs | default(false) | bool }}"
+    vm_name: "{{ vm_name | default('linux-testmac') }}"
+    new_vm_name: "{{ new_vm_name | default('linux-testmac2') }}"
+
+  tasks:
+    - name: Verify required tools are installed on the Ansible host
+      ansible.builtin.command: "which sshpass"
+      register: sshpass_check
+      failed_when: sshpass_check.rc != 0
+      changed_when: false
+
+    - name: List all VMs on ESXi
+      community.vmware.vmware_vm_info:
+        hostname: "{{ esxi_hostname }}"
+        username: "{{ esxi_username }}"
+        password: "{{ esxi_password }}"
+        validate_certs: "{{ validate_certs }}"
+      delegate_to: localhost
+      register: vms
+
+    - name: Display all VMs
+      ansible.builtin.debug:
+        msg: "VMs on ESXi: {{ vms.virtual_machines | map(attribute='guest_name') | list }}"
+
+    - name: Fail if the target VM is not found
+      ansible.builtin.fail:
+        msg: "VM {{ vm_name }} not found on ESXi host."
+      when: vms.virtual_machines | selectattr('guest_name', 'equalto', vm_name) | list | length == 0
+
+    - name: Get the VM ID
+      ansible.builtin.set_fact:
+        vm_id: "{{ (vms.virtual_machines | selectattr('guest_name', 'equalto', vm_name) | first).moid }}"
+
+    - name: Get the VM's disk path
+      ansible.builtin.set_fact:
+        vm_disk_path: "{{ (vms.virtual_machines | selectattr('guest_name', 'equalto', vm_name) | first).datastore_url[0].url }}"
+
+    - name: Check if the VM directory exists
+      ansible.builtin.command:
+        cmd: "sshpass -p '{{ esxi_password }}' ssh -o StrictHostKeyChecking=no {{ esxi_username }}@{{ esxi_hostname }} 'ls -d {{ vm_disk_path }}{{ vm_name }}'"
+      register: dir_check
+      failed_when: dir_check.rc != 0
+      changed_when: false
+
+    - name: Check if the new VM directory already exists
+      ansible.builtin.command:
+        cmd: "sshpass -p '{{ esxi_password }}' ssh -o StrictHostKeyChecking=no {{ esxi_username }}@{{ esxi_hostname }} 'ls -d {{ vm_disk_path }}{{ new_vm_name }}'"
+      register: new_dir_check
+      failed_when: new_dir_check.rc == 0
+      ignore_errors: true
+      changed_when: false
+
+    - name: Check the power state of the VM
+      ansible.builtin.command:
+        cmd: "sshpass -p '{{ esxi_password }}' ssh -o StrictHostKeyChecking=no {{ esxi_username }}@{{ esxi_hostname }} 'vim-cmd vmsvc/get.summary {{ vm_id }}'"
+      register: power_state_check
+      changed_when: false
+
+    - name: Power on the target VM via SSH (if powered off)
+      ansible.builtin.command:
+        cmd: "sshpass -p '{{ esxi_password }}' ssh -o StrictHostKeyChecking=no {{ esxi_username }}@{{ esxi_hostname }} 'vim-cmd vmsvc/power.on {{ vm_id }}'"
+      register: power_on_result
+      changed_when: power_on_result.rc == 0
+      when: "'poweredOff' in power_state_check.stdout"
+
+    - name: Wait for the VM to power on (if powered on)
+      ansible.builtin.command:
+        cmd: "sshpass -p '{{ esxi_password }}' ssh -o StrictHostKeyChecking=no {{ esxi_username }}@{{ esxi_hostname }} 'vim-cmd vmsvc/get.summary {{ vm_id }}'"
+      register: power_state
+      until: "'poweredOn' in power_state.stdout"
+      retries: 30
+      delay: 10
+      when: power_on_result.changed | default(false)
+
+    - name: Power off the target VM for renaming via SSH
+      ansible.builtin.command:
+        cmd: "sshpass -p '{{ esxi_password }}' ssh -o StrictHostKeyChecking=no {{ esxi_username }}@{{ esxi_hostname }} 'vim-cmd vmsvc/power.off {{ vm_id }}'"
+      register: power_off_result
+      changed_when: power_off_result.rc == 0
+      when: "'poweredOn' in power_state_check.stdout or power_on_result.changed | default(false)"
+
+    - name: Wait for the VM to power off
+      ansible.builtin.command:
+        cmd: "sshpass -p '{{ esxi_password }}' ssh -o StrictHostKeyChecking=no {{ esxi_username }}@{{ esxi_hostname }} 'vim-cmd vmsvc/get.summary {{ vm_id }}'"
+      register: power_state
+      until: "'poweredOff' in power_state.stdout"
+      retries: 30
+      delay: 10
+      when: power_off_result.changed | default(false)
+
+    - name: Unregister the VM
+      ansible.builtin.command:
+        cmd: "sshpass -p '{{ esxi_password }}' ssh -o StrictHostKeyChecking=no {{ esxi_username }}@{{ esxi_hostname }} 'vim-cmd vmsvc/unregister {{ vm_id }}'"
+      register: unregister_result
+      changed_when: unregister_result.rc == 0
+
+    - name: Rename the VM directory on the datastore
+      ansible.builtin.command:
+        cmd: "sshpass -p '{{ esxi_password }}' ssh -o StrictHostKeyChecking=no {{ esxi_username }}@{{ esxi_hostname }} 'mv {{ vm_disk_path }}{{ vm_name }} {{ vm_disk_path }}{{ new_vm_name }}'"
+      register: rename_result
+      changed_when: rename_result.rc == 0
+
+    - name: Rename the VM files (e.g., .vmx, .vmdk)
+      ansible.builtin.command:
+        cmd: "sshpass -p '{{ esxi_password }}' ssh -o StrictHostKeyChecking=no {{ esxi_username }}@{{ esxi_hostname }} 'find {{ vm_disk_path }}{{ new_vm_name }} -type f -name \"*{{ vm_name }}*\" -exec sh -c \"mv {} {{ vm_disk_path }}{{ new_vm_name }}/\$(basename {} | sed s/{{ vm_name }}/{{ new_vm_name }}/g)\" \\;'"
+      register: rename_files_result
+      changed_when: rename_files_result.rc == 0
+
+    - name: Update the .vmx file to reflect the new name
+      ansible.builtin.command:
+        cmd: "sshpass -p '{{ esxi_password }}' ssh -o StrictHostKeyChecking=no {{ esxi_username }}@{{ esxi_hostname }} 'sed -i \"s/{{ vm_name }}/{{ new_vm_name }}/g\" {{ vm_disk_path }}{{ new_vm_name }}/{{ new_vm_name }}.vmx'"
+      register: update_vmx_result
+      changed_when: update_vmx_result.rc == 0
+
+    - name: Register the VM with the new name
+      ansible.builtin.command:
+        cmd: "sshpass -p '{{ esxi_password }}' ssh -o StrictHostKeyChecking=no {{ esxi_username }}@{{ esxi_hostname }} 'vim-cmd solo/registervm {{ vm_disk_path }}{{ new_vm_name }}/{{ new_vm_name }}.vmx'"
+      register: register_result
+      changed_when: register_result.rc == 0
+
+    - name: Verify the VM is registered with the new name
+      ansible.builtin.command:
+        cmd: "sshpass -p '{{ esxi_password }}' ssh -o StrictHostKeyChecking=no {{ esxi_username }}@{{ esxi_hostname }} 'vim-cmd vmsvc/getallvms'"
+      register: final_vm_list
+      changed_when: false
+
+    - name: Display final VM list
+      ansible.builtin.debug:
+        msg: "Final VM list: {{ final_vm_list.stdout_lines }}"
