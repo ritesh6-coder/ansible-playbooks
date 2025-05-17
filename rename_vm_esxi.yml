@@ -42,6 +42,21 @@
       when: not (vm_info.virtual_machines | selectattr('guest_name', 'equalto', old_vm_name) | list)
       tags: check
 
+    - name: Get detailed VM state
+      vmware_guest_info:
+        hostname: "{{ esxi_host }}"
+        username: "{{ vault_esxi_user }}"
+        password: "{{ vault_esxi_pass }}"
+        validate_certs: "{{ validate_certs }}"
+        name: "{{ old_vm_name }}"
+      register: detailed_vm_info
+      tags: power
+
+    - name: Debug VM state
+      ansible.builtin.debug:
+        msg: "VM state: {{ detailed_vm_info.instance }}"
+      tags: power
+
     - name: Power off VM if running
       vmware_guest_powerstate:
         hostname: "{{ esxi_host }}"
@@ -50,15 +65,16 @@
         validate_certs: "{{ validate_certs }}"
         name: "{{ old_vm_name }}"
         state: powered-off
-        state_change_timeout: 300  # Wait up to 5 minutes for the power-off
+        state_change_timeout: 300
+        force: true  # Attempt a hard shutdown if soft shutdown fails
       register: power_action
       when: (vm_info.virtual_machines | selectattr('guest_name', 'equalto', old_vm_name) | first).power_state == 'poweredOn'
       tags: power
-      ignore_errors: true  # Temporarily ignore errors to capture the full message
+      ignore_errors: true
 
     - name: Debug power off failure
       ansible.builtin.debug:
-        msg: "Power off failed: {{ power_action }}"
+        msg: "Power off failed with message: {{ power_action.msg | default('No error message available') }}"
       when: power_action.failed | default(false)
       tags: power
 
@@ -92,7 +108,7 @@
         validate_certs: "{{ validate_certs }}"
         name: "{{ new_vm_name }}"
         state: powered-on
-        state_change_timeout: 300  # Wait up to 5 minutes for the power-on
+        state_change_timeout: 300
       when:
         - power_action is defined
         - power_action.changed
