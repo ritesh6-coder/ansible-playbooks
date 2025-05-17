@@ -1,78 +1,169 @@
+# rename_vm_esxi.yml
 ---
-- name: Rename VM on ESXi Host
+- name: Rename Virtual Machine on ESXi Host
   hosts: localhost
   gather_facts: false
   collections:
     - community.vmware
   vars:
     esxi_host: "192.168.223.131"
-    vm_name: "linux-testmac"
+    old_vm_name: "linux-testmac"
     new_vm_name: "linux-test-renamed"
     validate_certs: false
 
   tasks:
-    - name: Validate ESXi connection
+    - name: Verify ESXi connection
       vmware_vm_info:
         hostname: "{{ esxi_host }}"
-        username: "{{ ansible_user }}"
-        password: "{{ ansible_password }}"
+        username: "{{ vault_esxi_user }}"
+        password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
       register: connection_test
-      changed_when: false
+      tags: always
 
     - name: Fail if connection failed
       ansible.builtin.fail:
-        msg: "Failed to connect to ESXi host {{ esxi_host }}"
+        msg: "Failed to connect to ESXi host: {{ connection_test.msg }}"
       when: connection_test.failed
+      tags: always
 
     - name: Get current VM info
       vmware_vm_info:
         hostname: "{{ esxi_host }}"
-        username: "{{ ansible_user }}"
-        password: "{{ ansible_password }}"
+        username: "{{ vault_esxi_user }}"
+        password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
-        vm_name: "{{ vm_name }}"
+        vm_name: "{{ old_vm_name }}"
       register: vm_info
+      tags: info
 
-    - name: Verify VM exists
+    - name: Ensure VM exists
       ansible.builtin.fail:
-        msg: "VM {{ vm_name }} not found on {{ esxi_host }}"
+        msg: "VM '{{ old_vm_name }}' not found on {{ esxi_host }}"
       when: vm_info.virtual_machines | length == 0
+      tags: check
 
     - name: Power off VM if running
       vmware_guest_powerstate:
         hostname: "{{ esxi_host }}"
-        username: "{{ ansible_user }}"
-        password: "{{ ansible_password }}"
+        username: "{{ vault_esxi_user }}"
+        password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
-        name: "{{ vm_name }}"
+        name: "{{ old_vm_name }}"
         state: powered-off
-      register: power_state
+      register: power_action
       when: vm_info.virtual_machines[0].power_state == 'poweredOn'
+      tags: power
 
     - name: Rename VM
       vmware_guest:
         hostname: "{{ esxi_host }}"
-        username: "{{ ansible_user }}"
-        password: "{{ ansible_password }}"
+        username: "{{ vault_esxi_user }}"
+        password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
-        name: "{{ vm_name }}"
+        name: "{{ old_vm_name }}"
         new_name: "{{ new_vm_name }}"
-        state: present
       register: rename_result
+      tags: rename
 
     - name: Show rename results
       ansible.builtin.debug:
         var: rename_result
+      tags: debug
 
-    - name: Power on VM if it was running
+    - name: Restore power state if changed
       vmware_guest_powerstate:
         hostname: "{{ esxi_host }}"
-        username: "{{ ansible_user }}"
-        password: "{{ ansible_password }}"
+        username: "{{ vault_esxi_user }}"
+        password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
         name: "{{ new_vm_name }}"
         state: powered-on
       when: 
-        - power_state is defined
-        - power_state.changed
+        - power_action is defined
+        - power_action.changed
+      tags: power# rename_vm_esxi.yml
+---
+- name: Rename Virtual Machine on ESXi Host
+  hosts: localhost
+  gather_facts: false
+  collections:
+    - community.vmware
+  vars:
+    esxi_host: "192.168.223.131"
+    old_vm_name: "linux-testmac"
+    new_vm_name: "linux-test-renamed"
+    validate_certs: false
+
+  tasks:
+    - name: Verify ESXi connection
+      vmware_vm_info:
+        hostname: "{{ esxi_host }}"
+        username: "{{ vault_esxi_user }}"
+        password: "{{ vault_esxi_pass }}"
+        validate_certs: "{{ validate_certs }}"
+      register: connection_test
+      tags: always
+
+    - name: Fail if connection failed
+      ansible.builtin.fail:
+        msg: "Failed to connect to ESXi host: {{ connection_test.msg }}"
+      when: connection_test.failed
+      tags: always
+
+    - name: Get current VM info
+      vmware_vm_info:
+        hostname: "{{ esxi_host }}"
+        username: "{{ vault_esxi_user }}"
+        password: "{{ vault_esxi_pass }}"
+        validate_certs: "{{ validate_certs }}"
+        vm_name: "{{ old_vm_name }}"
+      register: vm_info
+      tags: info
+
+    - name: Ensure VM exists
+      ansible.builtin.fail:
+        msg: "VM '{{ old_vm_name }}' not found on {{ esxi_host }}"
+      when: vm_info.virtual_machines | length == 0
+      tags: check
+
+    - name: Power off VM if running
+      vmware_guest_powerstate:
+        hostname: "{{ esxi_host }}"
+        username: "{{ vault_esxi_user }}"
+        password: "{{ vault_esxi_pass }}"
+        validate_certs: "{{ validate_certs }}"
+        name: "{{ old_vm_name }}"
+        state: powered-off
+      register: power_action
+      when: vm_info.virtual_machines[0].power_state == 'poweredOn'
+      tags: power
+
+    - name: Rename VM
+      vmware_guest:
+        hostname: "{{ esxi_host }}"
+        username: "{{ vault_esxi_user }}"
+        password: "{{ vault_esxi_pass }}"
+        validate_certs: "{{ validate_certs }}"
+        name: "{{ old_vm_name }}"
+        new_name: "{{ new_vm_name }}"
+      register: rename_result
+      tags: rename
+
+    - name: Show rename results
+      ansible.builtin.debug:
+        var: rename_result
+      tags: debug
+
+    - name: Restore power state if changed
+      vmware_guest_powerstate:
+        hostname: "{{ esxi_host }}"
+        username: "{{ vault_esxi_user }}"
+        password: "{{ vault_esxi_pass }}"
+        validate_certs: "{{ validate_certs }}"
+        name: "{{ new_vm_name }}"
+        state: powered-on
+      when: 
+        - power_action is defined
+        - power_action.changed
+      tags: power
