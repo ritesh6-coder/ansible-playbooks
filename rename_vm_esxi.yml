@@ -5,86 +5,59 @@
   collections:
     - community.vmware
   vars:
-    esxi_host: "192.168.223.131"
+    esxi_host: "192.168.223.131"  # Replace with your ESXi host IP
     old_vm_name: "linux-testmac"
     new_vm_name: "linux-test-renamed"
     validate_certs: false
 
   tasks:
-    - name: Verify ESXi connection
-      vmware_vm_info:
-        hostname: "{{ esxi_host }}"
-        username: "{{ vault_esxi_user }}"
-        password: "{{ vault_esxi_pass }}"
-        validate_certs: "{{ validate_certs }}"
-      register: connection_test
-      tags: always
-
-    - name: Fail if connection failed
-      ansible.builtin.fail:
-        msg: "Failed to connect to ESXi host: {{ connection_test.msg | default('Unknown error') }}"
-      when: connection_test.failed | default(false)
-      tags: always
-
-    - name: Get current VM info
-      vmware_vm_info:
+    - name: Get VM info
+      community.vmware.vmware_vm_info:
         hostname: "{{ esxi_host }}"
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
       register: vm_info
-      tags: info
+      tags: always
 
-    - name: Ensure VM exists
+    - name: Fail if VM not found
       ansible.builtin.fail:
         msg: "VM '{{ old_vm_name }}' not found on {{ esxi_host }}"
       when: not (vm_info.virtual_machines | selectattr('guest_name', 'equalto', old_vm_name) | list)
       tags: check
 
-    - name: Get detailed VM state
-      vmware_guest_info:
-        hostname: "{{ esxi_host }}"
-        username: "{{ vault_esxi_user }}"
-        password: "{{ vault_esxi_pass }}"
-        validate_certs: "{{ validate_certs }}"
-        name: "{{ old_vm_name }}"
-      register: detailed_vm_info
-      tags: power
-
     - name: Power off VM if running
-      vmware_guest_powerstate:
+      community.vmware.vmware_guest_powerstate:
         hostname: "{{ esxi_host }}"
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
-        folder: "{{ detailed_vm_info.instance.hw_folder }}"
         name: "{{ old_vm_name }}"
         state: powered-off
+        state_change_timeout: 300  # Wait up to 5 minutes for power-off
       register: power_action
-      when: detailed_vm_info.instance.power_state == 'poweredOn'
+      when: (vm_info.virtual_machines | selectattr('guest_name', 'equalto', old_vm_name) | first).power_state == 'poweredOn'
       tags: power
 
     - name: Rename VM
-      vmware_guest:
+      community.vmware.vmware_guest:
         hostname: "{{ esxi_host }}"
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
-        folder: "{{ detailed_vm_info.instance.hw_folder }}"
         name: "{{ old_vm_name }}"
         new_name: "{{ new_vm_name }}"
-        state: present
       tags: rename
 
     - name: Restore power state if changed
-      vmware_guest_powerstate:
+      community.vmware.vmware_guest_powerstate:
         hostname: "{{ esxi_host }}"
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
-        folder: "{{ detailed_vm_info.instance.hw_folder }}"
         name: "{{ new_vm_name }}"
         state: powered-on
+        state_change_timeout: 300  # Wait up to 5 minutes for power-on
       when:
         - power_action is defined
         - power_action.changed
