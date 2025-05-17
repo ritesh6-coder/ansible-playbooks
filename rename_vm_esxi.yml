@@ -1,7 +1,7 @@
 ---
 - name: Rename Virtual Machine on ESXi Host
   hosts: localhost
-  gathers_facts: false
+  gather_facts: false
   collections:
     - community.vmware
   vars:
