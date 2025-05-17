@@ -33,14 +33,13 @@
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
-        vm_name: "{{ old_vm_name }}"
       register: vm_info
       tags: info
 
     - name: Ensure VM exists
       ansible.builtin.fail:
         msg: "VM '{{ old_vm_name }}' not found on {{ esxi_host }}"
-      when: vm_info.virtual_machines | length == 0
+      when: not (vm_info.virtual_machines | selectattr('guest_name', 'equalto', old_vm_name) | list)
       tags: check
 
     - name: Power off VM if running
@@ -52,7 +51,7 @@
         name: "{{ old_vm_name }}"
         state: powered-off
       register: power_action
-      when: vm_info.virtual_machines[0].power_state == 'poweredOn'
+      when: (vm_info.virtual_machines | selectattr('guest_name', 'equalto', old_vm_name) | first).power_state == 'poweredOn'
       tags: power
 
     - name: Rename VM
