@@ -9,6 +9,7 @@
     old_vm_name: "linux-testmac"
     new_vm_name: "linux-test-renamed"
     validate_certs: false
+    datacenter: "ha-datacenter"  # Default datacenter for standalone ESXi
 
   tasks:
     - name: Verify ESXi connection
@@ -17,6 +18,7 @@
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
+        datacenter: "{{ datacenter }}"
       register: connection_test
       tags: always
 
@@ -32,6 +34,7 @@
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
+        datacenter: "{{ datacenter }}"
       register: vm_info
       tags: info
 
@@ -47,6 +50,7 @@
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
+        datacenter: "{{ datacenter }}"
         name: "{{ old_vm_name }}"
       register: detailed_vm_info
       tags: power
@@ -57,6 +61,7 @@
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
+        datacenter: "{{ datacenter }}"
         folder: "{{ detailed_vm_info.instance.hw_folder }}"
         name: "{{ old_vm_name }}"
         state: powered-off
@@ -70,6 +75,7 @@
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
+        datacenter: "{{ datacenter }}"
         folder: "{{ detailed_vm_info.instance.hw_folder }}"
         name: "{{ old_vm_name }}"
         new_name: "{{ new_vm_name }}"
@@ -82,6 +88,7 @@
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
+        datacenter: "{{ datacenter }}"
         folder: "{{ detailed_vm_info.instance.hw_folder }}"
         name: "{{ new_vm_name }}"
         state: powered-on
