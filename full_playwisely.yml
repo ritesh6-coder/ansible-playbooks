@@ -1,79 +1,72 @@
 ---
-- name: Safely rename an ESXi virtual machine
-  hosts: localhost
-  gather_facts: false
+- name: Fully rename an ESXi VM (folder + internal files)
+  hosts: 192.168.223.131
+  gather_facts: no
   vars:
-    esxi_host: 192.168.223.131
-    esxi_user: admin
-    esxi_password: redhat
-    old_vm_name: linux-testmac_1
-    new_vm_name: linux-testmac_1_renamed
-    datastore_name: datastore1
-    vm_folder: "/vmfs/volumes/{{ datastore_name }}/{{ new_vm_name }}"
-
+    old_vm_name: "{{ vm_name }}"
+    new_vm_name: "{{ vm_name }}"
+    datastore: "datastore1"
+    datastore_path: "/vmfs/volumes/{{ datastore }}"
+    old_path: "{{ datastore_path }}/{{ old_vm_name }}"
+    new_path: "{{ datastore_path }}/{{ new_vm_name }}"
   tasks:
 
-    - name: Get VMID of the old VM
-      shell: |
-        sshpass -p {{ esxi_password }} ssh -o StrictHostKeyChecking=no {{ esxi_user }}@{{ esxi_host }} "vim-cmd vmsvc/getallvms | grep {{ old_vm_name }} | awk '{print $1}'"
-      register: vmid_result
+    - name: Get VM ID by name
+      shell: "vim-cmd vmsvc/getallvms | grep '{{ old_vm_name }}' | awk '{print $1}'"
+      register: vm_id_output
+      failed_when: vm_id_output.stdout == ""
+      changed_when: false
 
-    - name: Set VMID fact
+    - name: Set VM ID
       set_fact:
-        vm_id: "{{ vmid_result.stdout }}"
+        vm_id: "{{ vm_id_output.stdout.strip() }}"
 
-    - name: Power off the VM
+    - name: Take snapshot before renaming
+      shell: >
+        vim-cmd vmsvc/snapshot.create {{ vm_id }}
+        "pre-rename-backup" "Snapshot before full rename" 0 0
+
+    - name: Power off the VM if it's running
+      shell: >
+        if vim-cmd vmsvc/power.getstate {{ vm_id }} | grep -q "Powered on"; then
+          vim-cmd vmsvc/power.off {{ vm_id }}
+        fi
+
+    - name: Unregister VM from inventory
+      shell: vim-cmd vmsvc/unregister {{ vm_id }}
+
+    - name: Rename folder
+      shell: mv "{{ old_path }}" "{{ new_path }}"
+
+    - name: Rename internal VM files
       shell: |
-        sshpass -p {{ esxi_password }} ssh {{ esxi_user }}@{{ esxi_host }} "vim-cmd vmsvc/power.off {{ vm_id }}"
-      when: vm_id != ""
+        cd "{{ new_path }}"
+        for file in $(ls); do
+          newfile=$(echo "$file" | sed "s/{{ old_vm_name }}/{{ new_vm_name }}/g")
+          mv "$file" "$newfile"
+        done
+
+    - name: Update .vmx contents with new VM name
+      shell: |
+        sed -i 's/displayName = \".*\"/displayName = \"{{ new_vm_name }}\"/' "{{ new_path }}/{{ new_vm_name }}.vmx"
+        sed -i "s/{{ old_vm_name }}/{{ new_vm_name }}/g" "{{ new_path }}/{{ new_vm_name }}.vmx"
+
+    - name: Update .vmsd if exists
+      shell: |
+        if [ -f "{{ new_path }}/{{ new_vm_name }}.vmsd" ]; then
+          sed -i "s/{{ old_vm_name }}/{{ new_vm_name }}/g" "{{ new_path }}/{{ new_vm_name }}.vmsd"
+        fi
       ignore_errors: true
 
-    - name: Wait for VM to power off
-      pause:
-        seconds: 10
+    - name: Register renamed VM
+      shell: vim-cmd solo/registervm "{{ new_path }}/{{ new_vm_name }}.vmx"
 
-    - name: Unregister the VM from inventory
-      shell: |
-        sshpass -p {{ esxi_password }} ssh {{ esxi_user }}@{{ esxi_host }} "vim-cmd vmsvc/unregister {{ vm_id }}"
-      when: vm_id != ""
-      ignore_errors: true
+    - name: List VMs to confirm rename
+      shell: vim-cmd vmsvc/getallvms
+      register: final_vm_list
+      changed_when: false
 
-    - name: Rename VM folder
-      shell: |
-        sshpass -p {{ esxi_password }} ssh {{ esxi_user }}@{{ esxi_host }} \
-        "mv /vmfs/volumes/{{ datastore_name }}/{{ old_vm_name }} {{ vm_folder }}"
-
-    - name: Rename all internal files inside the folder
-      shell: |
-        sshpass -p {{ esxi_password }} ssh {{ esxi_user }}@{{ esxi_host }} \
-        "cd {{ vm_folder }} && for f in *{{ old_vm_name }}*; do newf=$(echo $f | sed 's/{{ old_vm_name }}/{{ new_vm_name }}/g'); mv \"$f\" \"$newf\"; done"
-
-    - name: Update VMX file contents to reflect new disk names
-      shell: |
-        sshpass -p {{ esxi_password }} ssh {{ esxi_user }}@{{ esxi_host }} \
-        "sed -i 's/{{ old_vm_name }}/{{ new_vm_name }}/g' {{ vm_folder }}/{{ new_vm_name }}.vmx"
-
-    - name: Register the renamed VM
-      shell: |
-        sshpass -p {{ esxi_password }} ssh {{ esxi_user }}@{{ esxi_host }} \
-        "vim-cmd solo/registervm {{ vm_folder }}/{{ new_vm_name }}.vmx"
-
-    - name: Wait before power on
-      pause:
-        seconds: 5
-
-    - name: Get new VM ID
-      shell: |
-        sshpass -p {{ esxi_password }} ssh {{ esxi_user }}@{{ esxi_host }} \
-        "vim-cmd vmsvc/getallvms | grep {{ new_vm_name }} | awk '{print $1}'"
-      register: new_vmid_result
-
-    - name: Set new VMID
-      set_fact:
-        new_vm_id: "{{ new_vmid_result.stdout }}"
-
-    - name: Power on the newly renamed VM
-      shell: |
-        sshpass -p {{ esxi_password }} ssh {{ esxi_user }}@{{ esxi_host }} \
-        "vim-cmd vmsvc/power.on {{ new_vm_id }}"
+    - name: Show VM list
+      debug:
+        msg: "{{ final_vm_list.stdout_lines }}"
 
