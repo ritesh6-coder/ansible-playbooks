@@ -1,6 +1,6 @@
 ---
 - name: Rename ESXi VM using SSH and CLI with snapshot backup
-  hosts: esxi
+  hosts: 192.168.223.131
   gather_facts: no
   vars:
     old_vm_name: "linux-testmac"            # current VM name/folder on datastore
