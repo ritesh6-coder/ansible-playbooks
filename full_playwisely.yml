@@ -1,19 +1,24 @@
 ---
 - name: Rename or revert an ESXi VM safely
-  hosts: 192.168.223.131
-  gather_facts: false
-  become: yes
+  hosts: all
+  gather_facts: no
   vars:
-    power_on: true  # Set to true to power on VM after rename
+    # AWX Extra Vars: Input from user
+    old_vm_name: "{{ old_vm_name }}"  # VM name to rename or revert
+    new_vm_name: "{{ new_vm_name }}"  # New name to rename to (or revert from)
+    power_on: {{ power_on }}           # true/false - Power on after rename
+    snapshot_before: {{ snapshot_before }}  # true/false - Snapshot before rename
+    mode: "{{ mode }}"                 # 'rename' or 'revert'
+
   tasks:
 
     - name: List all VMs on ESXi host
       shell: vim-cmd vmsvc/getallvms
-      register: getallvms_output
+      register: vmlist
 
     - name: Count existing VMs on host
       set_fact:
-        vm_count: "{{ getallvms_output.stdout_lines | length - 1 }}"
+        vm_count: "{{ vmlist.stdout_lines | length - 1 }}"
 
     - name: Display current VM count
       debug:
@@ -21,125 +26,74 @@
 
     - name: Fail if old and new names are identical
       fail:
-        msg: "Old and new VM names are identical ({{ old_vm_name }}); nothing to do."
+        msg: "Old and new VM names are the same. Nothing to do."
       when: old_vm_name == new_vm_name
 
     - name: Prevent duplicate renaming if new name includes old name
       fail:
-        msg: "The new VM name '{{ new_vm_name }}' appears to include the old VM name '{{ old_vm_name }}'. Duplicate renaming is not allowed."
-      when: new_vm_name.endswith(old_vm_name)
+        msg: "New VM name '{{ new_vm_name }}' includes the old VM name '{{ old_vm_name }}'. Possible conflict."
+      when: mode == 'rename' and new_vm_name in old_vm_name
 
     - name: Check for existing VM with new name
+      shell: vim-cmd vmsvc/getallvms | grep -w "{{ new_vm_name }}"
+      register: new_vm_exists
+      ignore_errors: yes
+      when: mode == 'rename'
+
+    - name: Fail if VM with new name already exists
       fail:
-        msg: "A VM with the name '{{ new_vm_name }}' already exists on the host. Aborting rename."
-      when: (" " + new_vm_name + " ") in getallvms_output.stdout
+        msg: "A VM named '{{ new_vm_name }}' already exists on the host."
+      when: mode == 'rename' and new_vm_exists.rc == 0
 
     - name: Search for line containing old VM name
       set_fact:
         old_vm_line: >-
-          {{ getallvms_output.stdout_lines
-             | select('match', '^\\s*\\d+\\s+' + old_vm_name + '\\s')
-             | list | first | default('') }}
+          {{ vmlist.stdout_lines[1:] | select("search", old_vm_name) | list | first | default("") }}
 
     - name: Fail if old VM is not found
       fail:
         msg: "VM '{{ old_vm_name }}' not found. Nothing to rename."
-      when: old_vm_line == ''
+      when: old_vm_line == ""
 
-    - name: Extract old VM ID from matched line
+    - name: Extract VM ID from line
       set_fact:
         old_vm_id: "{{ old_vm_line.split()[0] }}"
 
-    - name: Check the power state of the old VM
-      shell: vim-cmd vmsvc/power.getstate {{ old_vm_id }}
-      register: power_state
-
-    - name: Power off the old VM if it is powered on
-      shell: vim-cmd vmsvc/power.off {{ old_vm_id }}
-      when: "'Powered on' in power_state.stdout"
-
-    - name: Unregister the old VM from ESXi host inventory
-      shell: vim-cmd vmsvc/unregister {{ old_vm_id }}
-
-    - name: Check if the old VM folder exists on the datastore
-      stat:
-        path: /vmfs/volumes/datastore1/{{ old_vm_name }}
-      register: old_folder
-
-    - name: Check if the new VM folder already exists on the datastore
-      stat:
-        path: /vmfs/volumes/datastore1/{{ new_vm_name }}
-      register: new_folder
-
-    - name: Fail if target VM folder already exists (avoid conflict)
-      fail:
-        msg: "Target VM folder '/vmfs/volumes/datastore1/{{ new_vm_name }}' already exists. Aborting."
-      when: new_folder.stat.exists
-
-    - name: Rename VM folder on datastore
-      shell: mv /vmfs/volumes/datastore1/{{ old_vm_name }} /vmfs/volumes/datastore1/{{ new_vm_name }}
-      when: old_folder.stat.exists and not new_folder.stat.exists
-
-    - name: Rename VM files inside the folder to new name
-      shell: |
-        cd /vmfs/volumes/datastore1/{{ new_vm_name }}
-        for f in *; do
-          if [[ "$f" == *"{{ old_vm_name }}"* ]]; then
-            mv "$f" "${f/{{ old_vm_name }}/{{ new_vm_name }}}"
-          fi
-        done
-      args:
-        executable: /bin/bash
-      when: old_folder.stat.exists and not new_folder.stat.exists
-
-    - name: Update VMX file displayName and references to new name
-      replace:
-        path: /vmfs/volumes/datastore1/{{ new_vm_name }}/{{ new_vm_name }}.vmx
-        regexp: "{{ old_vm_name }}"
-        replace: "{{ new_vm_name }}"
-      when: old_folder.stat.exists and not new_folder.stat.exists
-
-    - name: Check if VMSD (snapshot descriptor) exists
-      stat:
-        path: /vmfs/volumes/datastore1/{{ new_vm_name }}/{{ new_vm_name }}.vmsd
-      register: vmsd_file
-
-    - name: Update VMSD references to new name
-      replace:
-        path: /vmfs/volumes/datastore1/{{ new_vm_name }}/{{ new_vm_name }}.vmsd
-        regexp: "{{ old_vm_name }}"
-        replace: "{{ new_vm_name }}"
-      when: vmsd_file.stat.exists and old_folder.stat.exists and not new_folder.stat.exists
-
-    - name: Register the VM with the new name in ESXi
-      shell: vim-cmd solo/registervm /vmfs/volumes/datastore1/{{ new_vm_name }}/{{ new_vm_name }}.vmx
-      register: register_vm
-
-    - name: Get the new VM ID after registration
-      shell: vim-cmd vmsvc/getallvms | grep " {{ new_vm_name }} " | awk '{print $1}'
-      register: new_vm_id_search
-
-    - name: Set fact for new VM ID
+    - name: Extract datastore from line
       set_fact:
-        new_vm_id: "{{ new_vm_id_search.stdout }}"
+        datastore: >-
+          {{ old_vm_line.split()[2].split(']')[0].strip('[') }}
 
-    - name: Fail if new VM registration failed
-      fail:
-        msg: "Registration of VM '{{ new_vm_name }}' failed - new VM not found."
-      when: new_vm_id == ""
+    - name: Take snapshot before rename if enabled
+      shell: vim-cmd vmsvc/snapshot.create {{ old_vm_id }} pre_rename_snapshot "Snapshot before rename" 0 0
+      when: snapshot_before | bool and mode == 'rename'
 
-    - name: Create a snapshot of the renamed VM for backup
-      shell: 'vim-cmd vmsvc/snapshot.create {{ new_vm_id }} "{{ new_vm_name }}_snapshot" "Snapshot created after renaming VM" 0 0'
+    - name: Power off VM before rename
+      shell: vim-cmd vmsvc/power.off {{ old_vm_id }}
+      ignore_errors: true
 
-    - name: Power on the new VM if requested
-      shell: vim-cmd vmsvc/power.on {{ new_vm_id }}
+    - name: Rename VM folder in datastore
+      shell: >
+        mv "/vmfs/volumes/{{ datastore }}/{{ old_vm_name }}" "/vmfs/volumes/{{ datastore }}/{{ new_vm_name }}"
+      when: mode == 'rename'
+
+    - name: Rename .vmx and .vmdk files
+      shell: >
+        for file in $(ls "/vmfs/volumes/{{ datastore }}/{{ new_vm_name }}/" | grep '{{ old_vm_name }}'); do
+          mv "/vmfs/volumes/{{ datastore }}/{{ new_vm_name }}/$file" "/vmfs/volumes/{{ datastore }}/{{ new_vm_name }}/$file" | sed "s/{{ old_vm_name }}/{{ new_vm_name }}/g";
+        done
+      when: mode == 'rename'
+
+    - name: Register renamed VM
+      shell: >
+        vim-cmd solo/registervm "/vmfs/volumes/{{ datastore }}/{{ new_vm_name }}/{{ new_vm_name }}.vmx" {{ new_vm_name }}
+      when: mode == 'rename'
+
+    - name: Take snapshot after revert if snapshot_before is false
+      shell: vim-cmd vmsvc/snapshot.create {{ old_vm_id }} post_revert_snapshot "Snapshot after revert" 0 0
+      when: snapshot_before | bool == false and mode == 'revert'
+
+    - name: Power on VM if requested
+      shell: vim-cmd vmsvc/power.on {{ old_vm_id }}
       when: power_on | bool
-
-    - name: List all VMs on ESXi host after rename
-      shell: vim-cmd vmsvc/getallvms
-      register: final_vms
-
-    - name: Display final VM list
-      debug:
-        msg: "{{ final_vms.stdout }}"
 
