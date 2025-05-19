@@ -1,18 +1,19 @@
-# rename_vm_esxi.yml
+# vm_management_playbook.yml
 ---
-- name: Rename Virtual Machine on ESXi Host
+- name: Manage ESXi Virtual Machine
   hosts: localhost
   gather_facts: false
   collections:
     - community.vmware
   vars:
-    esxi_host: "192.168.223.131"  # Replace with your ESXi host IP if different
-    old_vm_name: "linux-testmac"
-    new_vm_name: "linux-test-renamed"
+    esxi_host: "192.168.223.131"
+    vm_name: "linux-testmac"
     validate_certs: false
-    datacenter: "ha-datacenter"   # Default datacenter for standalone ESXi
+    datacenter: "ha-datacenter"
+    shutdown_timeout: 300  # 5 minutes timeout for clean shutdown
 
   tasks:
+    # ========== CONNECTION VERIFICATION ==========
     - name: Verify ESXi connection
       vmware_vm_info:
         hostname: "{{ esxi_host }}"
@@ -24,76 +25,87 @@
 
     - name: Fail if connection failed
       ansible.builtin.fail:
-        msg: "Failed to connect to ESXi host: {{ connection_test.msg | default('Unknown error') }}"
+        msg: "ESXi connection failed: {{ connection_test.msg | default('Unknown error') }}"
       when: connection_test.failed | default(false)
       tags: always
 
-    - name: Get current VM info
-      vmware_vm_info:
-        hostname: "{{ esxi_host }}"
-        username: "{{ vault_esxi_user }}"
-        password: "{{ vault_esxi_pass }}"
-        validate_certs: "{{ validate_certs }}"
-      register: vm_info
-      tags: info
-
-    - name: Ensure VM exists
-      ansible.builtin.fail:
-        msg: "VM '{{ old_vm_name }}' not found on {{ esxi_host }}"
-      when: not (vm_info.virtual_machines | selectattr('guest_name', 'equalto', old_vm_name) | list)
-      tags: check
-
-    - name: Get detailed VM state
+    # ========== VM TOOLS VERIFICATION ==========
+    - name: Get detailed VM info
       vmware_guest_info:
         hostname: "{{ esxi_host }}"
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
-        folder: "/{{ datacenter }}/vm"  # Using folder instead of datacenter
-        name: "{{ old_vm_name }}"
-      register: detailed_vm_info
+        folder: "/{{ datacenter }}/vm"
+        name: "{{ vm_name }}"
+      register: vm_info
+      tags: info
+
+    - name: Verify VMware Tools status
+      ansible.builtin.assert:
+        that:
+          - vm_info.instance.guest_tools_status == 'guestToolsRunning'
+          - vm_info.instance.guest_tools_version == '11269'
+        fail_msg: "VMware Tools not running or incorrect version"
+        success_msg: "VMware Tools running (v{{ vm_info.instance.guest_tools_version }})"
+      tags: tools-check
+
+    # ========== POWER MANAGEMENT ==========
+    - name: Clean shutdown sequence
+      block:
+        - name: Attempt clean shutdown (VMware Tools)
+          vmware_guest_powerstate:
+            hostname: "{{ esxi_host }}"
+            username: "{{ vault_esxi_user }}"
+            password: "{{ vault_esxi_pass }}"
+            validate_certs: "{{ validate_certs }}"
+            folder: "/{{ datacenter }}/vm"
+            name: "{{ vm_name }}"
+            state: powered-off
+            state_change_timeout: "{{ shutdown_timeout }}"
+            force: false
+          register: shutdown_attempt
+          ignore_errors: true
+
+        - name: Force shutdown if clean failed
+          vmware_guest_powerstate:
+            hostname: "{{ esxi_host }}"
+            username: "{{ vault_esxi_user }}"
+            password: "{{ vault_esxi_pass }}"
+            validate_certs: "{{ validate_certs }}"
+            folder: "/{{ datacenter }}/vm"
+            name: "{{ vm_name }}"
+            state: powered-off
+            force: true
+          when: shutdown_attempt is failed
+      when: vm_info.instance.power_state == 'poweredOn'
       tags: power
 
-    - name: Power off VM if running
+    # ========== VM CONFIGURATION ==========
+    - name: Update VM configuration
+      vmware_guest:
+        hostname: "{{ esxi_host }}"
+        username: "{{ vault_esxi_user }}"
+        password: "{{ vault_esxi_pass }}"
+        validate_certs: "{{ validate_certs }}"
+        folder: "/{{ datacenter }}/vm"
+        name: "{{ vm_name }}"
+        hardware:
+          memory_mb: 2048  # Example: Set to 2GB
+          num_cpus: 2      # Example: Set to 2 vCPUs
+          version: 19      # VM hardware version (ESXi 8.0 compatible)
+      tags: config
+
+    # ========== POWER ON ==========
+    - name: Power on VM
       vmware_guest_powerstate:
         hostname: "{{ esxi_host }}"
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
-        folder: "/{{ datacenter }}/vm"  # Using folder instead of datacenter
-        name: "{{ old_vm_name }}"
-        state: powered-off
-        state_change_timeout: 300
-        force: true
-      register: power_action
-      when: (vm_info.virtual_machines | selectattr('guest_name', 'equalto', old_vm_name) | first).power_state == 'poweredOn'
-      tags: power
-      ignore_errors: true  # Prevents playbook failure if power-off fails
-
-    - name: Rename VM
-      community.vmware.vmware_guest_rename:
-        hostname: "{{ esxi_host }}"
-        username: "{{ vault_esxi_user }}"
-        password: "{{ vault_esxi_pass }}"
-        validate_certs: "{{ validate_certs }}"
-        datacenter: "{{ datacenter }}"
         folder: "/{{ datacenter }}/vm"
-        uuid: "{{ (vm_info.virtual_machines | selectattr('guest_name', 'equalto', old_vm_name) | first).uuid }}"
-        new_name: "{{ new_vm_name }}"
-      register: rename_result
-      tags: rename
-
-    - name: Restore power state if changed
-      vmware_guest_powerstate:
-        hostname: "{{ esxi_host }}"
-        username: "{{ vault_esxi_user }}"
-        password: "{{ vault_esxi_pass }}"
-        validate_certs: "{{ validate_certs }}"
-        folder: "/{{ datacenter }}/vm"
-        name: "{{ new_vm_name }}"
+        name: "{{ vm_name }}"
         state: powered-on
-        state_change_timeout: 300
-      when:
-        - power_action is defined
-        - power_action.changed
+        state_change_timeout: 120
+      when: vm_info.instance.power_state == 'poweredOff'
       tags: power
