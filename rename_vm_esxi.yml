@@ -18,7 +18,6 @@
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
-        datacenter: "{{ datacenter }}"
       register: connection_test
       tags: always
 
@@ -34,7 +33,6 @@
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
-        datacenter: "{{ datacenter }}"
       register: vm_info
       tags: info
 
@@ -44,7 +42,7 @@
       when: not (vm_info.virtual_machines | selectattr('guest_name', 'equalto', old_vm_name) | list)
       tags: check
 
-    - name: Get detailed VM state
+    - name: Get detailed VM state_detailed VM state
       vmware_guest_info:
         hostname: "{{ esxi_host }}"
         username: "{{ vault_esxi_user }}"
