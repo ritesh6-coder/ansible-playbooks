@@ -3,8 +3,8 @@
   hosts: 192.168.223.131
   gather_facts: no
   vars:
-    old_vm_name: "{{ vm_name }}"
-    new_vm_name: "{{ vm_name }}"
+    old_vm_name: "{{ old_vm_name }}"
+    new_vm_name: "{{ new_vm_name }}"
     datastore: "datastore1"
     datastore_path: "/vmfs/volumes/{{ datastore }}"
     old_path: "{{ datastore_path }}/{{ old_vm_name }}"
