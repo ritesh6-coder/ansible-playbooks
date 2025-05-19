@@ -1,85 +1,85 @@
 ---
 - name: Rename or revert an ESXi VM safely
-  hosts: 192.168.223.131
-  gather_facts: false
+  hosts: esxi
+  gather_facts: no
   vars:
-    old_vm_name: "{{ old_vm_name }}"          # VM to rename or revert
-    new_vm_name: "{{ new_vm_name }}"          # Target name (or revert-from name)
-    power_on: "{{ power_on }}"                # Power on VM after action (true/false)
-    snapshot_before: "{{ snapshot_before }}"  # Take snapshot before rename (true/false)
-    mode: "{{ mode }}"                        # rename or revert
+    # These vars will be passed from AWX extra vars
+    old_vm_name: "{{ old_vm_name }}"     # VM name to rename or revert
+    new_vm_name: "{{ new_vm_name }}"     # New name to rename to (or revert from)
+    power_on: "{{ power_on }}"            # true/false - Power on after rename
+    snapshot_before: "{{ snapshot_before }}"  # true/false - Take snapshot before rename
+    mode: "{{ mode }}"                    # 'rename' or 'revert'
 
   tasks:
-
     - name: List all VMs on ESXi host
-      command: vim-cmd vmsvc/getallvms
+      shell: vim-cmd vmsvc/getallvms
       register: vm_list
 
     - name: Fail if VM list is empty or malformed
       fail:
-        msg: "No VMs found or ESXi command failed."
+        msg: "Failed to retrieve VM list or list is empty."
       when: vm_list.stdout_lines | length <= 1
 
     - name: Display current VM count
       debug:
-        msg: "There are {{ (vm_list.stdout_lines | length) - 1 }} VMs on the host."
+        msg: "There are {{ vm_list.stdout_lines | length - 1 }} VMs on the host."
 
     - name: Extract line for old VM
       set_fact:
         old_vm_line: "{{ item }}"
       loop: "{{ vm_list.stdout_lines[1:] }}"
-      when: "' ' ~ old_vm_name ~ ' ' in item"
-      register: old_vm_search
+      when: old_vm_name in item
 
     - name: Fail if old VM is not found
       fail:
-        msg: "VM '{{ old_vm_name }}' not found. Nothing to {{ mode }}."
-      when: old_vm_search.results | selectattr('ansible_facts.old_vm_line', 'defined') | list | length == 0
+        msg: "VM '{{ old_vm_name }}' not found."
+      when: old_vm_line is not defined
 
     - name: Set old VM details
       set_fact:
-        old_vm_line: "{{ old_vm_search.results | selectattr('ansible_facts.old_vm_line', 'defined') | map(attribute='ansible_facts.old_vm_line') | list | first }}"
-        vmid: "{{ (old_vm_line.split())[0] }}"
-        current_vm_name: "{{ (old_vm_line.split())[1] }}"
-        datastore_path: "{{ (old_vm_line.split())[2] }}"
+        vmid: "{{ old_vm_line.split()[0] }}"
+        current_vm_name: "{{ old_vm_line.split()[1] }}"
+        datastore_path: "{{ old_vm_line.split()[2] }}"
 
     - name: Take snapshot before rename (if enabled)
-      command: vim-cmd vmsvc/snapshot.create {{ vmid }} pre_rename_snapshot "Snapshot before rename"
-      when: snapshot_before | bool and mode == 'rename'
+      shell: vim-cmd vmsvc/snapshot.create {{ vmid }} pre_rename_snapshot "Snapshot before rename"
+      when: snapshot_before | bool
 
     - name: Rename or revert VM files (folder, VMDK, VMX)
       shell: |
         VM_DIR="/vmfs/volumes/{{ datastore_path.split(']')[0].strip('[') }}/{{ current_vm_name }}"
         NEW_DIR="/vmfs/volumes/{{ datastore_path.split(']')[0].strip('[') }}/{{ new_vm_name }}"
+
         if [ "{{ mode }}" = "rename" ]; then
           mv "$VM_DIR" "$NEW_DIR"
-          find "$NEW_DIR" -type f -exec bash -c 'f="{}"; mv "$f" "${f//'{{ old_vm_name }}'/'{{ new_vm_name }}'}"' \;
+          for f in "$NEW_DIR"/*{{ old_vm_name }}*; do
+            mv "$f" "${f//'{{ old_vm_name }}'/'{{ new_vm_name }}'}"
+          done
           sed -i 's/{{ old_vm_name }}/{{ new_vm_name }}/g' "$NEW_DIR/{{ new_vm_name }}.vmx"
+
         elif [ "{{ mode }}" = "revert" ]; then
           mv "$VM_DIR" "$NEW_DIR"
-          find "$NEW_DIR" -type f -exec bash -c 'f="{}"; mv "$f" "${f//'{{ new_vm_name }}'/'{{ old_vm_name }}'}"' \;
+          for f in "$NEW_DIR"/*{{ new_vm_name }}*; do
+            mv "$f" "${f//'{{ new_vm_name }}'/'{{ old_vm_name }}'}"
+          done
           sed -i 's/{{ new_vm_name }}/{{ old_vm_name }}/g' "$NEW_DIR/{{ old_vm_name }}.vmx"
         fi
 
-    - name: Unregister old VM
-      command: vim-cmd vmsvc/unregister {{ vmid }}
+    - name: Unregister original VM
+      shell: vim-cmd vmsvc/unregister {{ vmid }}
 
-    - name: Register new VM and capture new VMID
+    - name: Register renamed or reverted VM
       shell: |
-        vim-cmd solo/registervm "[{{ datastore_path.split(']')[0].strip('[') }}] {{ new_vm_name if mode == 'rename' else old_vm_name }}/{{ new_vm_name if mode == 'rename' else old_vm_name }}.vmx"
-      register: register_out
+        vmx_path="{{ datastore_path | regex_replace(old_vm_name, new_vm_name) }}/{{ new_vm_name }}.vmx"
+        full_path="/vmfs/volumes/{{ vmx_path }}"
+        vim-cmd solo/registervm "$full_path"
+      register: new_vmid_output
 
-    - name: Set new VMID from output
+    - name: Extract new VMID
       set_fact:
-        new_vmid: "{{ register_out.stdout | regex_search('[0-9]+') }}"
+        new_vmid: "{{ new_vmid_output.stdout.split()[-1] }}"
 
-    - name: Power on new VM (if enabled)
-      command: vim-cmd vmsvc/power.on {{ new_vmid }}
+    - name: Power on the VM (if selected)
+      shell: vim-cmd vmsvc/power.on {{ new_vmid }}
       when: power_on | bool
-
-    - name: Show success message
-      debug:
-        msg: >-
-          VM {{ old_vm_name if mode == 'rename' else new_vm_name }} has been successfully
-          {{ 'renamed to ' + new_vm_name if mode == 'rename' else 'reverted to ' + old_vm_name }}.
 
