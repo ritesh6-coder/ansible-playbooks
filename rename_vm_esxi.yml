@@ -49,7 +49,7 @@
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
-        datacenter: "{{ datacenter }}"  # Added required parameter
+        folder: "/{{ datacenter }}/vm"  # Using folder instead of datacenter
         name: "{{ old_vm_name }}"
       register: detailed_vm_info
       tags: power
@@ -60,7 +60,7 @@
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
-        datacenter: "{{ datacenter }}"  # Added required parameter
+        folder: "/{{ datacenter }}/vm"  # Using folder instead of datacenter
         name: "{{ old_vm_name }}"
         state: powered-off
         state_change_timeout: 300
@@ -71,13 +71,14 @@
       ignore_errors: true  # Prevents playbook failure if power-off fails
 
     - name: Rename VM
-      vmware_guest:
+      community.vmware.vmware_guest_rename:
         hostname: "{{ esxi_host }}"
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
-        datacenter: "{{ datacenter }}"  # Added required parameter
-        name: "{{ old_vm_name }}"
+        datacenter: "{{ datacenter }}"
+        folder: "/{{ datacenter }}/vm"
+        uuid: "{{ (vm_info.virtual_machines | selectattr('guest_name', 'equalto', old_vm_name) | first).uuid }}"
         new_name: "{{ new_vm_name }}"
       register: rename_result
       tags: rename
@@ -88,7 +89,7 @@
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
-        datacenter: "{{ datacenter }}"  # Added required parameter
+        folder: "/{{ datacenter }}/vm"
         name: "{{ new_vm_name }}"
         state: powered-on
         state_change_timeout: 300
