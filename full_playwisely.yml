@@ -3,52 +3,51 @@
   hosts: 192.168.223.131
   gather_facts: no
   vars:
-    old_vm_name: "{{ old_vm_name | default('linux-testmachine') }}"
-    new_vm_name: "{{ new_vm_name | default('linux-renamed') }}"
-    power_on: "{{ power_on | default('true') }}"
-    snapshot_before: "{{ snapshot_before | default('false') }}"
-    mode: "{{ mode | default('rename') }}"
+    old_vm_name: "{{ lookup('vars', 'old_vm_name') }}"
+    new_vm_name: "{{ lookup('vars', 'new_vm_name') }}"
+    power_on: "{{ lookup('vars', 'power_on') | default('false') | bool }}"
+    snapshot_before: "{{ lookup('vars', 'snapshot_before') | default('false') | bool }}"
+    mode: "{{ lookup('vars', 'mode') | default('rename') }}"
+
   tasks:
 
     - name: Get all VMs
       shell: vim-cmd vmsvc/getallvms
-      register: vm_list
+      register: vmlist
 
     - name: Fail if VM list is empty or malformed
       fail:
-        msg: "Failed to get VMs or no VMs found on the ESXi host"
-      when: vm_list.stdout_lines | length <= 1
+        msg: "No VMs found on the host or output format invalid"
+      when: vmlist.stdout_lines | length <= 1
 
     - name: Display current VM count
       debug:
-        msg: "There are {{ vm_list.stdout_lines | length - 1 }} VMs on the host."
+        msg: "There are {{ vmlist.stdout_lines | length - 1 }} VMs on the host."
 
     - name: Extract line for old VM
       set_fact:
         old_vm_line: "{{ item }}"
-      loop: "{{ vm_list.stdout_lines[1:] }}"
+      loop: "{{ vmlist.stdout_lines[1:] }}"
       when: "'{{ old_vm_name }}' in item"
-      register: old_vm_line_check
 
     - name: Fail if old VM is not found
       fail:
-        msg: "VM named '{{ old_vm_name }}' not found."
-      when: old_vm_line_check.results | selectattr('ansible_facts.old_vm_line', 'defined') | list | length == 0
+        msg: "VM '{{ old_vm_name }}' not found."
+      when: old_vm_line is not defined
 
     - name: Set old VM details
       set_fact:
-        vmid: "{{ (old_vm_line_check.results | selectattr('ansible_facts.old_vm_line', 'defined') | map(attribute='ansible_facts.old_vm_line') | list).0.split()[0] }}"
-        current_vm_name: "{{ old_vm_name if mode == 'rename' else new_vm_name }}"
-        target_vm_name: "{{ new_vm_name if mode == 'rename' else old_vm_name }}"
-        datastore_path: "{{ (old_vm_line_check.results | selectattr('ansible_facts.old_vm_line', 'defined') | map(attribute='ansible_facts.old_vm_line') | list).0.split()[2] }}"
+        vmid: "{{ old_vm_line.split()[0] }}"
+        current_vm_name: "{{ old_vm_line.split()[1] }}"
+        datastore_path: "{{ old_vm_line.split()[2].split(']')[0] + ']' }}"
+        target_vm_name: "{{ new_vm_name }}"
 
     - name: Take snapshot before rename (if enabled)
-      shell: "vim-cmd vmsvc/snapshot.create {{ vmid }} pre_rename_snapshot 'Snapshot before renaming VM'"
-      when: snapshot_before | bool
+      shell: vim-cmd vmsvc/snapshot.create {{ vmid }} "pre-rename-snap" "Snapshot before renaming" 0 0
+      when: snapshot_before
 
     - name: Power off VM before renaming/unregistering
-      shell: "vim-cmd vmsvc/power.off {{ vmid }}"
-      ignore_errors: yes
+      shell: vim-cmd vmsvc/power.off {{ vmid }}
 
     - name: Rename or revert VM files (folder, VMDK, VMX)
       shell: |
@@ -68,28 +67,23 @@
 
         sed -i "s/${current_vm_name}/${target_vm_name}/g" "$DST_DIR/${target_vm_name}.vmx"
       register: rename_result
-      ignore_errors: yes
 
     - name: Unregister original VM
-      shell: "vim-cmd vmsvc/unregister {{ vmid }}"
+      shell: vim-cmd vmsvc/unregister {{ vmid }}
       register: unregister_result
-      failed_when: unregister_result.rc != 0 and 'Powered on' not in unregister_result.stderr
+      failed_when: false
 
     - name: Re-register renamed VM
       shell: |
-        VMX_PATH="{{ datastore_path }}/{{ target_vm_name }}/{{ target_vm_name }}.vmx"
+        VMX_PATH="[{{ datastore_path | regex_replace('[\\[\\]]', '') }}]/{{ target_vm_name }}/{{ target_vm_name }}.vmx"
         vim-cmd solo/registervm "$VMX_PATH"
       when: unregister_result is succeeded or 'Powered on' in unregister_result.stderr
 
-    - name: Power on VM if requested
+    - name: Power on VM (if enabled)
       shell: vim-cmd vmsvc/power.on $(vim-cmd vmsvc/getallvms | grep "{{ target_vm_name }}" | awk '{print $1}')
-      when: power_on | bool
+      when: power_on
 
-    - name: Final validation output
-      shell: vim-cmd vmsvc/getallvms | grep "{{ target_vm_name }}"
-      register: final_check
-
-    - name: Show final registered VM line
+    - name: Final confirmation
       debug:
-        var: final_check.stdout_lines
+        msg: "Operation '{{ mode }}' completed successfully for VM '{{ target_vm_name }}'."
 
