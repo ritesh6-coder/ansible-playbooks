@@ -3,9 +3,12 @@
   hosts: 192.168.223.131
   gather_facts: no
   vars:
-    old_vm_name: "{{ vm_name }}"   # Pass this variable from AWX extra vars
+    old_vm_name: "{{ vm_name }}"  # Input from AWX extra vars
     new_vm_name: "{{ vm_name }}-renamed"
     datastore_path: "/vmfs/volumes/datastore1"
+    old_folder_path: "{{ datastore_path }}/{{ old_vm_name }}"
+    new_folder_path: "{{ datastore_path }}/{{ new_vm_name }}"
+    vmx_file: "{{ new_folder_path }}/{{ old_vm_name }}.vmx"
   tasks:
 
     - name: Confirm SSH login success
@@ -23,7 +26,7 @@
 
     - name: Count total VMs on host
       set_fact:
-        total_vms: "{{ all_vms_raw.stdout_lines | length - 1 }}"  # subtract header line
+        total_vms: "{{ all_vms_raw.stdout_lines | length - 1 }}"  # exclude header
 
     - name: Show total VM count
       debug:
@@ -64,7 +67,7 @@
         msg: "{{ poweroff_result.stdout }}"
 
     - name: Rename VM folder on datastore
-      shell: mv "{{ datastore_path }}/{{ old_vm_name }}" "{{ datastore_path }}/{{ new_vm_name }}"
+      shell: mv "{{ old_folder_path }}" "{{ new_folder_path }}"
       register: mv_folder_result
       failed_when: mv_folder_result.rc != 0 and "No such file or directory" not in mv_folder_result.stderr
 
@@ -72,13 +75,30 @@
       debug:
         msg: "{{ mv_folder_result.stderr if mv_folder_result.rc != 0 else 'Folder renamed successfully' }}"
 
-    - name: Rename VM inside ESXi
-      shell: vim-cmd vmsvc/rename {{ vm_id }} "{{ new_vm_name }}"
-      register: rename_vm_result
+    - name: Unregister the VM from ESXi
+      shell: vim-cmd vmsvc/unregister {{ vm_id }}
+      register: unregister_result
 
-    - name: Show rename VM result
+    - name: Confirm VM unregistration
       debug:
-        msg: "{{ rename_vm_result.stdout }}"
+        msg: "VM with ID {{ vm_id }} unregistered."
+
+    - name: Update displayName in VMX file
+      shell: |
+        sed -i 's/displayName = \".*\"/displayName = \"{{ new_vm_name }}\"/' "{{ vmx_file }}"
+      register: vmx_update_result
+
+    - name: Confirm VMX update
+      debug:
+        msg: "VMX displayName updated to {{ new_vm_name }}."
+
+    - name: Register the VM again with new name
+      shell: vim-cmd solo/registervm "{{ vmx_file }}"
+      register: register_result
+
+    - name: Show registration result
+      debug:
+        msg: "{{ register_result.stdout_lines }}"
 
     - name: List all VMs after rename
       shell: vim-cmd vmsvc/getallvms
