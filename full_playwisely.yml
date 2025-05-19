@@ -1,6 +1,6 @@
 ---
 - name: Rename or revert an ESXi VM safely
-  hosts: esxi
+  hosts: 192.168.223.131
   gather_facts: no
   vars:
     # These vars will be passed from AWX extra vars
