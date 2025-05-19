@@ -1,110 +1,72 @@
 ---
-- name: Rename ESXi VM with pre-checks and snapshot backup
+- name: Fully rename an ESXi VM (folder + internal files)
   hosts: 192.168.223.131
   gather_facts: no
   vars:
-    old_vm_name: "{{ vm_name }}"  # Input from AWX extra vars
+    old_vm_name: "{{ vm_name }}"
     new_vm_name: "{{ vm_name }}-renamed"
-    datastore_path: "/vmfs/volumes/datastore1"
-    old_folder_path: "{{ datastore_path }}/{{ old_vm_name }}"
-    new_folder_path: "{{ datastore_path }}/{{ new_vm_name }}"
-    vmx_file: "{{ new_folder_path }}/{{ old_vm_name }}.vmx"
+    datastore: "datastore1"
+    datastore_path: "/vmfs/volumes/{{ datastore }}"
+    old_path: "{{ datastore_path }}/{{ old_vm_name }}"
+    new_path: "{{ datastore_path }}/{{ new_vm_name }}"
   tasks:
 
-    - name: Confirm SSH login success
-      shell: echo "Login successful to ESXi host {{ inventory_hostname }}"
-      register: login_message
-
-    - name: Show login success message
-      debug:
-        msg: "{{ login_message.stdout }}"
-
-    - name: Get all VMs list
-      shell: vim-cmd vmsvc/getallvms
-      register: all_vms_raw
+    - name: Get VM ID by name
+      shell: "vim-cmd vmsvc/getallvms | grep '{{ old_vm_name }}' | awk '{print $1}'"
+      register: vm_id_output
+      failed_when: vm_id_output.stdout == ""
       changed_when: false
 
-    - name: Count total VMs on host
+    - name: Set VM ID
       set_fact:
-        total_vms: "{{ all_vms_raw.stdout_lines | length - 1 }}"  # exclude header
+        vm_id: "{{ vm_id_output.stdout.strip() }}"
 
-    - name: Show total VM count
-      debug:
-        msg: "Total VMs found on ESXi host: {{ total_vms }}"
+    - name: Take snapshot before renaming
+      shell: >
+        vim-cmd vmsvc/snapshot.create {{ vm_id }}
+        "pre-rename-backup" "Snapshot before full rename" 0 0
 
-    - name: Get VM details matching old_vm_name
-      shell: vim-cmd vmsvc/getallvms | grep "{{ old_vm_name }}"
-      register: vm_match
-      failed_when: vm_match.rc != 0
-
-    - name: Show matched VM details
-      debug:
-        msg: "{{ vm_match.stdout }}"
-
-    - name: Extract VM ID from matched VM
-      set_fact:
-        vm_id: "{{ vm_match.stdout.split()[0] }}"
-
-    - name: Take snapshot of VM before rename
-      shell: vim-cmd vmsvc/snapshot.create {{ vm_id }} "pre-rename-backup" "Snapshot before VM rename" 0 0
-      register: snapshot_result
-
-    - name: Show snapshot creation result
-      debug:
-        msg: "{{ snapshot_result.stdout }}"
-
-    - name: Power off the VM if powered on
-      shell: |
+    - name: Power off the VM if it's running
+      shell: >
         if vim-cmd vmsvc/power.getstate {{ vm_id }} | grep -q "Powered on"; then
           vim-cmd vmsvc/power.off {{ vm_id }}
-        else
-          echo "VM already powered off"
         fi
-      register: poweroff_result
 
-    - name: Show power off result
-      debug:
-        msg: "{{ poweroff_result.stdout }}"
-
-    - name: Rename VM folder on datastore
-      shell: mv "{{ old_folder_path }}" "{{ new_folder_path }}"
-      register: mv_folder_result
-      failed_when: mv_folder_result.rc != 0 and "No such file or directory" not in mv_folder_result.stderr
-
-    - name: Show rename folder result
-      debug:
-        msg: "{{ mv_folder_result.stderr if mv_folder_result.rc != 0 else 'Folder renamed successfully' }}"
-
-    - name: Unregister the VM from ESXi
+    - name: Unregister VM from inventory
       shell: vim-cmd vmsvc/unregister {{ vm_id }}
-      register: unregister_result
 
-    - name: Confirm VM unregistration
-      debug:
-        msg: "VM with ID {{ vm_id }} unregistered."
+    - name: Rename folder
+      shell: mv "{{ old_path }}" "{{ new_path }}"
 
-    - name: Update displayName in VMX file
+    - name: Rename internal VM files
       shell: |
-        sed -i 's/displayName = \".*\"/displayName = \"{{ new_vm_name }}\"/' "{{ vmx_file }}"
-      register: vmx_update_result
+        cd "{{ new_path }}"
+        for file in $(ls); do
+          newfile=$(echo "$file" | sed "s/{{ old_vm_name }}/{{ new_vm_name }}/g")
+          mv "$file" "$newfile"
+        done
 
-    - name: Confirm VMX update
-      debug:
-        msg: "VMX displayName updated to {{ new_vm_name }}."
+    - name: Update .vmx contents with new VM name
+      shell: |
+        sed -i 's/displayName = \".*\"/displayName = \"{{ new_vm_name }}\"/' "{{ new_path }}/{{ new_vm_name }}.vmx"
+        sed -i "s/{{ old_vm_name }}/{{ new_vm_name }}/g" "{{ new_path }}/{{ new_vm_name }}.vmx"
 
-    - name: Register the VM again with new name
-      shell: vim-cmd solo/registervm "{{ vmx_file }}"
-      register: register_result
+    - name: Update .vmsd if exists
+      shell: |
+        if [ -f "{{ new_path }}/{{ new_vm_name }}.vmsd" ]; then
+          sed -i "s/{{ old_vm_name }}/{{ new_vm_name }}/g" "{{ new_path }}/{{ new_vm_name }}.vmsd"
+        fi
+      ignore_errors: true
 
-    - name: Show registration result
-      debug:
-        msg: "{{ register_result.stdout_lines }}"
+    - name: Register renamed VM
+      shell: vim-cmd solo/registervm "{{ new_path }}/{{ new_vm_name }}.vmx"
 
-    - name: List all VMs after rename
+    - name: List VMs to confirm rename
       shell: vim-cmd vmsvc/getallvms
-      register: vms_list
+      register: final_vm_list
+      changed_when: false
 
-    - name: Show current VMs on ESXi host
+    - name: Show VM list
       debug:
-        msg: "{{ vms_list.stdout_lines }}"
+        msg: "{{ final_vm_list.stdout_lines }}"
 
