@@ -1,6 +1,6 @@
 ---
 - name: Rename ESXi VM with pre-checks and snapshot backup
-  hosts: esxi
+  hosts: 192.168.223.131
   gather_facts: no
   vars:
     old_vm_name: "{{ vm_name }}"   # Pass this variable from AWX extra vars
