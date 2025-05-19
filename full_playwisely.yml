@@ -1,6 +1,6 @@
 ---
 - name: Rename or revert an ESXi VM safely
-  hosts: esxi
+  hosts: 192.168.223.131
   gather_facts: false
   vars:
     old_vm_name: "{{ old_vm_name }}"          # VM to rename or revert
