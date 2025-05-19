@@ -1,0 +1,68 @@
+---
+- name: Rename ESXi VM using SSH and CLI with snapshot backup
+  hosts: esxi
+  gather_facts: no
+  vars:
+    old_vm_name: "linux-testmac"            # current VM name/folder on datastore
+    new_vm_name: "linux-testmac-renamed"    # new VM name/folder
+    datastore: "datastore1"                  # your datastore name
+    snapshot_name: "pre-rename-backup"       # snapshot name before rename
+    snapshot_description: "Snapshot before VM rename"
+  tasks:
+    - name: Get VM ID of the old VM
+      shell: vim-cmd vmsvc/getallvms | grep "{{ old_vm_name }}" | awk '{print $1}'
+      register: vm_id_raw
+      changed_when: false
+
+    - name: Set VM ID fact
+      set_fact:
+        vm_id: "{{ vm_id_raw.stdout }}"
+
+    - name: Fail if VM ID not found
+      fail:
+        msg: "VM named '{{ old_vm_name }}' not found"
+      when: vm_id == ""
+
+    - name: Take snapshot of VM before rename
+      shell: vim-cmd vmsvc/snapshot.create {{ vm_id }} "{{ snapshot_name }}" "{{ snapshot_description }}" 0 0
+      register: snapshot_result
+
+    - name: Debug snapshot creation result
+      debug:
+        msg: "{{ snapshot_result.stdout }}"
+
+    - name: Power off the VM if powered on
+      shell: |
+        if vim-cmd vmsvc/power.getstate {{ vm_id }} | grep -q "Powered on"; then
+          vim-cmd vmsvc/power.off {{ vm_id }}
+        else
+          echo "VM already powered off"
+        fi
+      ignore_errors: yes
+
+    - name: Unregister the VM
+      shell: vim-cmd vmsvc/unregister {{ vm_id }}
+      ignore_errors: yes
+
+    - name: Rename VM folder on datastore
+      shell: mv "/vmfs/volumes/{{ datastore }}/{{ old_vm_name }}" "/vmfs/volumes/{{ datastore }}/{{ new_vm_name }}"
+
+    - name: Rename VMX file inside new VM folder
+      shell: |
+        old_vmx=$(ls "/vmfs/volumes/{{ datastore }}/{{ new_vm_name }}"/*.vmx | head -n 1)
+        new_vmx="/vmfs/volumes/{{ datastore }}/{{ new_vm_name }}/{{ new_vm_name }}.vmx"
+        mv "$old_vmx" "$new_vmx"
+      args:
+        executable: /bin/bash
+
+    - name: Update VMX file displayName to new VM name
+      shell: sed -i "s/displayName = \".*\"/displayName = \"{{ new_vm_name }}\"/" "/vmfs/volumes/{{ datastore }}/{{ new_vm_name }}/{{ new_vm_name }}.vmx"
+
+    - name: Register VM with new VMX path
+      shell: vim-cmd solo/registervm "/vmfs/volumes/{{ datastore }}/{{ new_vm_name }}/{{ new_vm_name }}.vmx"
+      register: register_vm_result
+
+    - name: Show new VM ID after registration
+      debug:
+        msg: "{{ register_vm_result.stdout }}"
+
