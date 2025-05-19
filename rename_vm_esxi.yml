@@ -59,7 +59,6 @@
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
-        datacenter: "{{ datacenter }}"
         folder: "{{ detailed_vm_info.instance.hw_folder }}"
         name: "{{ old_vm_name }}"
         state: powered-off
@@ -74,7 +73,6 @@
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
-        datacenter: "{{ datacenter }}"
         folder: "{{ detailed_vm_info.instance.hw_folder }}"
         name: "{{ old_vm_name }}"
         new_name: "{{ new_vm_name }}"
@@ -87,7 +85,6 @@
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
-        datacenter: "{{ datacenter }}"
         folder: "{{ detailed_vm_info.instance.hw_folder }}"
         name: "{{ new_vm_name }}"
         state: powered-on
