@@ -1,240 +1,95 @@
-- name: Rename or revert ESXi VM
+---
+- name: Rename or revert an ESXi VM safely
   hosts: 192.168.223.131
-  gather_facts: false
+  gather_facts: no
+  vars:
+    old_vm_name: "{{ old_vm_name | default('linux-testmachine') }}"
+    new_vm_name: "{{ new_vm_name | default('linux-renamed') }}"
+    power_on: "{{ power_on | default('true') }}"
+    snapshot_before: "{{ snapshot_before | default('false') }}"
+    mode: "{{ mode | default('rename') }}"
   tasks:
-    - name: Set source and target names based on mode
-      set_fact:
-        source_name: "{{ old_vm_name if mode == 'rename' else new_vm_name }}"
-        target_name: "{{ new_vm_name if mode == 'rename' else old_vm_name }}"
-      vars:
-        ansible_python_interpreter: /usr/bin/env python3
-      # Choose names depending on rename or revert mode.
 
-    - name: Gather information on source VM (if it exists)
-      community.vmware.vmware_guest_info:
-        hostname: "{{ esxi_hostname }}"
-        username: "{{ esxi_username }}"
-        password: "{{ esxi_password }}"
-        validate_certs: false
-        name: "{{ source_name }}"
-        datacenter: ha-datacenter
-        folder: "/ha-datacenter/vm"
-      register: vm_info
-      ignore_errors: true
-      delegate_to: localhost
-      # Get VM info for source_name; ignore failure if not present.
-
-    - name: Gather information on target VM (if it exists)
-      community.vmware.vmware_guest_info:
-        hostname: "{{ esxi_hostname }}"
-        username: "{{ esxi_username }}"
-        password: "{{ esxi_password }}"
-        validate_certs: false
-        name: "{{ target_name }}"
-        datacenter: ha-datacenter
-        folder: "/ha-datacenter/vm"
-      register: vm_target_info
-      ignore_errors: true
-      delegate_to: localhost
-      # Check if VM with target_name is already registered.
-
-    - name: Skip rename/revert if already done
-      debug:
-        msg: "Skipping: {{source_name}} not found and {{target_name}} already exists"
-      when: vm_info.instance is not defined and vm_target_info.instance is defined
-
-    - name: Fail if both source and target VMs exist (conflict)
-      fail:
-        msg: "Both {{ source_name }} and {{ target_name }} exist. Cannot proceed."
-      when: vm_info.instance is defined and vm_target_info.instance is defined
-
-    - name: Fail if neither source nor target found
-      fail:
-        msg: "Neither {{ source_name }} nor {{ target_name }} found. Cannot proceed."
-      when: vm_info.instance is not defined and vm_target_info.instance is not defined
-
-    - name: Rename/revert VM (main operations)
-      block:
-        - name: Ensure VM is powered off
-          community.vmware.vmware_guest:
-            hostname: "{{ esxi_hostname }}"
-            username: "{{ esxi_username }}"
-            password: "{{ esxi_password }}"
-            validate_certs: false
-            name: "{{ source_name }}"
-            state: poweredoff
-          delegate_to: localhost
-          # Power off to avoid file locks.
-
-        - name: Take snapshot before rename if requested
-          community.vmware.vmware_guest_snapshot:
-            hostname: "{{ esxi_hostname }}"
-            username: "{{ esxi_username }}"
-            password: "{{ esxi_password }}"
-            validate_certs: false
-            name: "{{ source_name }}"
-            snapshot_name: "pre_{{ mode }}_{{ source_name }}"
-            description: "Snapshot before {{ mode }} {{ source_name }}"
-            state: present
-            include_memory: no
-          when: snapshot_before and vm_info.instance is defined
-          delegate_to: localhost
-          # Snapshot without memory for safety.
-
-        - name: Unregister VM from inventory (keep files)
-          community.vmware.vmware_guest:
-            hostname: "{{ esxi_hostname }}"
-            username: "{{ esxi_username }}"
-            password: "{{ esxi_password }}"
-            validate_certs: false
-            name: "{{ source_name }}"
-            state: absent
-            delete_from_inventory: yes
-          delegate_to: localhost
-          # Remove VM from inventory (do not delete disks).
-
-        - name: Compute datastore and original folder from VM info
-          set_fact:
-            ds: "{{ vm_info.instance.hw_files[0] | regex_search('\\[(.*?)\\]', '\\1') }}"
-            vm_path: "{{ vm_info.instance.hw_files[0] | regex_replace('^.*\\] ', '') }}"
-          delegate_to: localhost
-          # Extract datastore name and full VM path from info.
-
-        - name: Extract VM directory name
-          set_fact:
-            vm_dir: "{{ vm_path.split('/')[0] }}"
-          delegate_to: localhost
-          # VM directory (usually matches VM name).
-
-        - name: Rename primary VMDK (descriptor) using vmkfstools
-          raw: >-
-            vmkfstools -E /vmfs/volumes/{{ ds }}/{{ vm_dir }}/{{ source_name }}.vmdk \
-                       /vmfs/volumes/{{ ds }}/{{ vm_dir }}/{{ target_name }}.vmdk
-          delegate_to: "{{ inventory_hostname }}"
-          when: vm_info.instance is defined
-          # vmkfstools also renames the -flat file and updates references.
-
-        - name: Copy and edit VMX file
-          block:
-            - name: Copy original VMX to new VMX
-              raw: >-
-                cp /vmfs/volumes/{{ ds }}/{{ vm_dir }}/{{ source_name }}.vmx \
-                   /vmfs/volumes/{{ ds }}/{{ vm_dir }}/{{ target_name }}.vmx
-              delegate_to: "{{ inventory_hostname }}"
-              # Duplicate .vmx before editing.
-            - name: Update VMX references (displayName, nvram, etc.)
-              raw: >-
-                sed -i \
-                  -e 's/displayName = "{{ source_name }}"/displayName = "{{ target_name }}"/g' \
-                  -e 's/nvram = "{{ source_name }}.nvram"/nvram = "{{ target_name }}.nvram"/g' \
-                  -e 's/extendedConfigFile = "{{ source_name }}.vmxf"/extendedConfigFile = "{{ target_name }}.vmxf"/g' \
-                  -e 's/{{ source_name }}-UUID/{{ target_name }}-UUID/g' \
-                  /vmfs/volumes/{{ ds }}/{{ vm_dir }}/{{ target_name }}.vmx
-              delegate_to: "{{ inventory_hostname }}"
-              # Replace key references in the VMX file.
-            - name: Update VMX swap file paths
-              raw: >-
-                sed -i 's#/vmfs/volumes/{{ ds }}/{{ vm_dir }}/{{ source_name }}#/vmfs/volumes/{{ ds }}/{{ vm_dir }}/{{ target_name }}#g' \
-                /vmfs/volumes/{{ ds }}/{{ vm_dir }}/{{ target_name }}.vmx
-              delegate_to: "{{ inventory_hostname }}"
-              # Fix any swap file references (path changes).
-          when: vm_info.instance is defined
-
-        - name: Rename other VM files (nvram, vmxf, vmsd)
-          block:
-            - name: Rename NVram file
-              raw: mv /vmfs/volumes/{{ ds }}/{{ vm_dir }}/{{ source_name }}.nvram /vmfs/volumes/{{ ds }}/{{ vm_dir }}/{{ target_name }}.nvram
-              delegate_to: "{{ inventory_hostname }}"
-            - name: Rename extended config (.vmxf)
-              raw: mv /vmfs/volumes/{{ ds }}/{{ vm_dir }}/{{ source_name }}.vmxf /vmfs/volumes/{{ ds }}/{{ vm_dir }}/{{ target_name }}.vmxf
-              delegate_to: "{{ inventory_hostname }}"
-            - name: Rename snapshot descriptor (.vmsd) if present
-              raw: mv /vmfs/volumes/{{ ds }}/{{ vm_dir }}/{{ source_name }}.vmsd /vmfs/volumes/{{ ds }}/{{ vm_dir }}/{{ target_name }}.vmsd
-              delegate_to: "{{ inventory_hostname }}"
-              ignore_errors: true
-          when: vm_info.instance is defined
-          # Move NVram, VMXF, VMSD (if any) to new names.
-
-        - name: Update VMSD content for new name
-          raw: |
-            if [ -f /vmfs/volumes/{{ ds }}/{{ vm_dir }}/{{ target_name }}.vmsd ]; then \
-              sed -i 's/{{ source_name }}/{{ target_name }}/g' /vmfs/volumes/{{ ds }}/{{ vm_dir }}/{{ target_name }}.vmsd; \
-            fi
-          delegate_to: "{{ inventory_hostname }}"
-          when: vm_info.instance is defined
-          # Correct any internal references in VMSD.
-
-        - name: Rename VM directory
-          raw: mv /vmfs/volumes/{{ ds }}/{{ vm_dir }} /vmfs/volumes/{{ ds }}/{{ target_name }}
-          delegate_to: "{{ inventory_hostname }}"
-          when: vm_info.instance is defined
-          # Rename the VM folder on the datastore.
-
-        - name: Register the VM with new name
-          community.vmware.vmware_guest:
-            hostname: "{{ esxi_hostname }}"
-            username: "{{ esxi_username }}"
-            password: "{{ esxi_password }}"
-            validate_certs: false
-            datacenter: ha-datacenter
-            folder: "/ha-datacenter/vm"
-            name: "{{ target_name }}"
-            state: present
-            uuid: "{{ vm_info.instance.instance_uuid }}"
-          delegate_to: localhost
-          # Add the renamed VM back into inventory by UUID.
-
-        - name: Power on VM if requested
-          community.vmware.vmware_guest:
-            hostname: "{{ esxi_hostname }}"
-            username: "{{ esxi_username }}"
-            password: "{{ esxi_password }}"
-            validate_certs: false
-            name: "{{ target_name }}"
-            state: poweredon
-          when: power_on
-          delegate_to: localhost
-          # Power on the VM after rename if flag is true.
-      when: vm_info.instance is defined and vm_target_info.instance is not defined
-
-    - name: Final validation - gather VM info
-      community.vmware.vmware_guest_info:
-        hostname: "{{ esxi_hostname }}"
-        username: "{{ esxi_username }}"
-        password: "{{ esxi_password }}"
-        validate_certs: false
-        name: "{{ target_name }}"
-        datacenter: ha-datacenter
-        folder: "/ha-datacenter/vm"
-      register: vm_final_info
-      delegate_to: localhost
-      ignore_errors: true
-
-    - name: Fail if final VM is not found
-      fail:
-        msg: "VM {{ target_name }} not registered properly!"
-      when: vm_final_info.instance is not defined
-
-    - name: Confirm final VM name matches
-      assert:
-        that:
-          - vm_final_info.instance.hw_name == target_name
-        fail_msg: "VM name mismatch (expected {{ target_name }})"
-
-    - name: Verify VM directory exists on datastore
-      raw: "ls /vmfs/volumes/{{ ds }}/{{ target_name }}"
-      delegate_to: "{{ inventory_hostname }}"
-      register: dir_check
-      failed_when: dir_check.rc != 0
-      # Confirm the VM folder was successfully renamed.
-
-    - name: Show all registered VMs for verification
-      command: vim-cmd vmsvc/getallvms
+    - name: Get all VMs
+      shell: vim-cmd vmsvc/getallvms
       register: vm_list
-      changed_when: false
-      delegate_to: "{{ inventory_hostname }}"
 
-    - debug:
-        var: vm_list.stdout_lines
-      # Final VM inventory listing.
+    - name: Fail if VM list is empty or malformed
+      fail:
+        msg: "Failed to get VMs or no VMs found on the ESXi host"
+      when: vm_list.stdout_lines | length <= 1
+
+    - name: Display current VM count
+      debug:
+        msg: "There are {{ vm_list.stdout_lines | length - 1 }} VMs on the host."
+
+    - name: Extract line for old VM
+      set_fact:
+        old_vm_line: "{{ item }}"
+      loop: "{{ vm_list.stdout_lines[1:] }}"
+      when: "'{{ old_vm_name }}' in item"
+      register: old_vm_line_check
+
+    - name: Fail if old VM is not found
+      fail:
+        msg: "VM named '{{ old_vm_name }}' not found."
+      when: old_vm_line_check.results | selectattr('ansible_facts.old_vm_line', 'defined') | list | length == 0
+
+    - name: Set old VM details
+      set_fact:
+        vmid: "{{ (old_vm_line_check.results | selectattr('ansible_facts.old_vm_line', 'defined') | map(attribute='ansible_facts.old_vm_line') | list).0.split()[0] }}"
+        current_vm_name: "{{ old_vm_name if mode == 'rename' else new_vm_name }}"
+        target_vm_name: "{{ new_vm_name if mode == 'rename' else old_vm_name }}"
+        datastore_path: "{{ (old_vm_line_check.results | selectattr('ansible_facts.old_vm_line', 'defined') | map(attribute='ansible_facts.old_vm_line') | list).0.split()[2] }}"
+
+    - name: Take snapshot before rename (if enabled)
+      shell: "vim-cmd vmsvc/snapshot.create {{ vmid }} pre_rename_snapshot 'Snapshot before renaming VM'"
+      when: snapshot_before | bool
+
+    - name: Power off VM before renaming/unregistering
+      shell: "vim-cmd vmsvc/power.off {{ vmid }}"
+      ignore_errors: yes
+
+    - name: Rename or revert VM files (folder, VMDK, VMX)
+      shell: |
+        SRC_DIR="/vmfs/volumes/{{ datastore_path | regex_replace('[\\[\\]]', '') }}/{{ current_vm_name }}"
+        DST_DIR="/vmfs/volumes/{{ datastore_path | regex_replace('[\\[\\]]', '') }}/{{ target_vm_name }}"
+
+        if [ ! -d "$SRC_DIR" ]; then
+          echo "Source directory $SRC_DIR doesn't exist, assuming already renamed. Skipping."
+          exit 0
+        fi
+
+        mv "$SRC_DIR" "$DST_DIR"
+
+        for f in "$DST_DIR"/*{{ current_vm_name }}*; do
+          mv "$f" "${f//${current_vm_name}/${target_vm_name}}"
+        done
+
+        sed -i "s/${current_vm_name}/${target_vm_name}/g" "$DST_DIR/${target_vm_name}.vmx"
+      register: rename_result
+      ignore_errors: yes
+
+    - name: Unregister original VM
+      shell: "vim-cmd vmsvc/unregister {{ vmid }}"
+      register: unregister_result
+      failed_when: unregister_result.rc != 0 and 'Powered on' not in unregister_result.stderr
+
+    - name: Re-register renamed VM
+      shell: |
+        VMX_PATH="{{ datastore_path }}/{{ target_vm_name }}/{{ target_vm_name }}.vmx"
+        vim-cmd solo/registervm "$VMX_PATH"
+      when: unregister_result is succeeded or 'Powered on' in unregister_result.stderr
+
+    - name: Power on VM if requested
+      shell: vim-cmd vmsvc/power.on $(vim-cmd vmsvc/getallvms | grep "{{ target_vm_name }}" | awk '{print $1}')
+      when: power_on | bool
+
+    - name: Final validation output
+      shell: vim-cmd vmsvc/getallvms | grep "{{ target_vm_name }}"
+      register: final_check
+
+    - name: Show final registered VM line
+      debug:
+        var: final_check.stdout_lines
 
