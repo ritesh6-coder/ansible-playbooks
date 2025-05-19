@@ -42,7 +42,7 @@
       when: not (vm_info.virtual_machines | selectattr('guest_name', 'equalto', old_vm_name) | list)
       tags: check
 
-    - name: Get detailed VM state_detailed VM state
+    - name: Get detailed VM state
       vmware_guest_info:
         hostname: "{{ esxi_host }}"
         username: "{{ vault_esxi_user }}"
@@ -64,7 +64,8 @@
         name: "{{ old_vm_name }}"
         state: powered-off
       register: power_action
-      when: detailed_vm_info.instance.power_state == 'poweredOn'
+      when: >
+        (vm_info.virtual_machines | selectattr('guest_name', 'equalto', old_vm_name) | first).power_state == 'poweredOn'
       tags: power
 
     - name: Rename VM
