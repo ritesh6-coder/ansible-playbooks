@@ -1,97 +1,58 @@
 ---
-- name: Rename or revert a VM in ESXi
+- name: Rename or revert an ESXi VM completely (files + config)
   hosts: 192.168.223.131
   gather_facts: false
   vars:
-    esxi_host: "{{ esxi_host }}"
-    esxi_user: "{{ esxi_user }}"
-    esxi_password: "{{ esxi_password }}"
-    old_vm_name: "{{ old_vm_name }}"
-    new_vm_name: "{{ new_vm_name }}"
-    operation: "{{ operation | default('rename') }}"  # rename or revert
-    take_snapshot: "{{ take_snapshot | default('false') }}"  # true or false
+    vmx_dir: ""
+    vm_id: ""
 
   tasks:
-    - name: Find VM ID from old VM name
-      shell: "vim-cmd vmsvc/getallvms | grep -w '{{ old_vm_name }}' | awk '{print $1}'"
-      register: vmid_result
+    - name: Get VM ID if registered
+      shell: "sshpass -p '{{ esxi_password }}' ssh -o StrictHostKeyChecking=no {{ esxi_user }}@{{ esxi_host }} \"vim-cmd vmsvc/getallvms | grep -i '{{ old_vm_name }}'\""
+      register: get_vmid
+      changed_when: false
 
-    - name: Fail if VM ID not found
-      fail:
-        msg: "VM with name {{ old_vm_name }} not found."
-      when: vmid_result.stdout == ""
-
-    - name: Set VM ID
+    - name: Set VM ID if found
       set_fact:
-        vm_id: "{{ vmid_result.stdout }}"
+        vm_id: "{{ get_vmid.stdout.split()[0] }}"
+      when: get_vmid.stdout != ""
 
-    - name: Get VMX path for VM ID
-      shell: "vim-cmd vmsvc/getallvms | grep -w '{{ old_vm_name }}' | awk '{print $3}'"
+    - name: Unregister VM if already registered
+      shell: "sshpass -p '{{ esxi_password }}' ssh -o StrictHostKeyChecking=no {{ esxi_user }}@{{ esxi_host }} vim-cmd vmsvc/unregister {{ vm_id }}"
+      when: vm_id != ""
+
+    - name: Find VMX file path
+      shell: "sshpass -p '{{ esxi_password }}' ssh -o StrictHostKeyChecking=no {{ esxi_user }}@{{ esxi_host }} find /vmfs/volumes/ -name '{{ old_vm_name }}.vmx'"
       register: vmx_path_result
 
-    - name: Extract VMX directory
+    - name: Set VMX directory
       set_fact:
-        vmx_dir: "/vmfs/volumes/{{ vmx_path_result.stdout.split(']')[0] | regex_replace('\[|\]', '') }}/{{ vmx_path_result.stdout.split(']')[1] | regex_replace('^ ', '') | dirname }}"
+        vmx_dir: '/vmfs/volumes/{{ vmx_path_result.stdout.split("]")[0] | regex_replace("\\[|\\]", "") }}/{{ vmx_path_result.stdout.split("]")[1] | regex_replace("^ ", "") | dirname }}'
 
-    - name: Take snapshot (optional)
-      shell: "vim-cmd vmsvc/snapshot.create {{ vm_id }} {{ old_vm_name }}-backup-$(date +%Y%m%d%H%M%S) auto snapshot"
-      when: take_snapshot == 'true'
+    - name: Optionally take a snapshot before changes
+      shell: "sshpass -p '{{ esxi_password }}' ssh -o StrictHostKeyChecking=no {{ esxi_user }}@{{ esxi_host }} \"vim-cmd vmsvc/snapshot.create {{ vm_id }} prechange-{{ lookup('pipe','date +%Y%m%d-%H%M%S') }}\""
+      when: take_snapshot | default(false) | bool and vm_id != ""
 
-    - name: Power off VM
-      shell: "vim-cmd vmsvc/power.off {{ vm_id }}"
-      ignore_errors: true
+    - name: Rename all related files inside VM folder
+      shell: >
+        sshpass -p '{{ esxi_password }}' ssh -o StrictHostKeyChecking=no {{ esxi_user }}@{{ esxi_host }} '
+        cd {{ vmx_dir }} && 
+        for file in $(ls); do
+          newname=$(echo "$file" | sed "s/{{ old_vm_name }}/{{ new_vm_name }}/g");
+          mv "$file" "$newname";
+        done'
 
-    - name: Unregister the VM
-      shell: "vim-cmd vmsvc/unregister {{ vm_id }}"
-
-    - name: Rename VM files (VMDK, VMX, NVRAM, VMSD, etc.)
-      shell: |
-        for file in $(ls {{ vmx_dir }} | grep '{{ old_vm_name }}'); do
-          newfile=$(echo $file | sed "s/{{ old_vm_name }}/{{ new_vm_name }}/g")
-          mv {{ vmx_dir }}/$file {{ vmx_dir }}/$newfile
-        done
-
-    - name: Replace VM name in VMX config file
-      replace:
-        path: "{{ vmx_dir }}/{{ new_vm_name }}.vmx"
-        regexp: '{{ old_vm_name }}'
-        replace: '{{ new_vm_name }}'
+    - name: Replace old VM name inside VMX config
+      shell: >
+        sshpass -p '{{ esxi_password }}' ssh -o StrictHostKeyChecking=no {{ esxi_user }}@{{ esxi_host }} \
+        "sed -i 's/{{ old_vm_name }}/{{ new_vm_name }}/g' {{ vmx_dir }}/{{ new_vm_name }}.vmx"
 
     - name: Register renamed VM
-      shell: "vim-cmd solo/registervm {{ vmx_dir }}/{{ new_vm_name }}.vmx"
-      register: new_vmid
+      shell: >
+        sshpass -p '{{ esxi_password }}' ssh -o StrictHostKeyChecking=no {{ esxi_user }}@{{ esxi_host }} \
+        "vim-cmd solo/registervm {{ vmx_dir }}/{{ new_vm_name }}.vmx"
 
-    - name: Power on renamed VM
-      shell: "vim-cmd vmsvc/power.on {{ new_vmid.stdout }}"
-      when: operation == 'rename'
-
-    - name: Revert logic - restore files and re-register with original name
-      block:
-        - name: Power off current VM
-          shell: "vim-cmd vmsvc/power.off {{ new_vmid.stdout }}"
-          ignore_errors: true
-
-        - name: Unregister renamed VM
-          shell: "vim-cmd vmsvc/unregister {{ new_vmid.stdout }}"
-
-        - name: Revert renamed files back to original
-          shell: |
-            for file in $(ls {{ vmx_dir }} | grep '{{ new_vm_name }}'); do
-              origfile=$(echo $file | sed "s/{{ new_vm_name }}/{{ old_vm_name }}/g")
-              mv {{ vmx_dir }}/$file {{ vmx_dir }}/$origfile
-            done
-
-        - name: Replace back VM name in VMX
-          replace:
-            path: "{{ vmx_dir }}/{{ old_vm_name }}.vmx"
-            regexp: '{{ new_vm_name }}'
-            replace: '{{ old_vm_name }}'
-
-        - name: Register reverted VM
-          shell: "vim-cmd solo/registervm {{ vmx_dir }}/{{ old_vm_name }}.vmx"
-          register: reverted_vmid
-
-        - name: Power on reverted VM
-          shell: "vim-cmd vmsvc/power.on {{ reverted_vmid.stdout }}"
-      when: operation == 'revert'
+    - name: Print success message
+      debug:
+        msg: "VM '{{ old_vm_name }}' has been renamed and re-registered as '{{ new_vm_name }}'."
 
