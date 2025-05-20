@@ -1,89 +1,97 @@
 ---
-- name: Rename or revert an ESXi VM safely
+- name: Rename or revert a VM in ESXi
   hosts: 192.168.223.131
-  gather_facts: no
+  gather_facts: false
   vars:
-    old_vm_name: "{{ lookup('vars', 'old_vm_name') }}"
-    new_vm_name: "{{ lookup('vars', 'new_vm_name') }}"
-    power_on: "{{ lookup('vars', 'power_on') | default('false') | bool }}"
-    snapshot_before: "{{ lookup('vars', 'snapshot_before') | default('false') | bool }}"
-    mode: "{{ lookup('vars', 'mode') | default('rename') }}"
+    esxi_host: "{{ esxi_host }}"
+    esxi_user: "{{ esxi_user }}"
+    esxi_password: "{{ esxi_password }}"
+    old_vm_name: "{{ old_vm_name }}"
+    new_vm_name: "{{ new_vm_name }}"
+    operation: "{{ operation | default('rename') }}"  # rename or revert
+    take_snapshot: "{{ take_snapshot | default('false') }}"  # true or false
 
   tasks:
+    - name: Find VM ID from old VM name
+      shell: "vim-cmd vmsvc/getallvms | grep -w '{{ old_vm_name }}' | awk '{print $1}'"
+      register: vmid_result
 
-    - name: Get all VMs
-      shell: vim-cmd vmsvc/getallvms
-      register: vmlist
-
-    - name: Fail if VM list is empty or malformed
+    - name: Fail if VM ID not found
       fail:
-        msg: "No VMs found on the host or output format invalid"
-      when: vmlist.stdout_lines | length <= 1
+        msg: "VM with name {{ old_vm_name }} not found."
+      when: vmid_result.stdout == ""
 
-    - name: Display current VM count
-      debug:
-        msg: "There are {{ vmlist.stdout_lines | length - 1 }} VMs on the host."
-
-    - name: Extract line for old VM
+    - name: Set VM ID
       set_fact:
-        old_vm_line: "{{ item }}"
-      loop: "{{ vmlist.stdout_lines[1:] }}"
-      when: "'{{ old_vm_name }}' in item"
+        vm_id: "{{ vmid_result.stdout }}"
 
-    - name: Fail if old VM is not found
-      fail:
-        msg: "VM '{{ old_vm_name }}' not found."
-      when: old_vm_line is not defined
+    - name: Get VMX path for VM ID
+      shell: "vim-cmd vmsvc/getallvms | grep -w '{{ old_vm_name }}' | awk '{print $3}'"
+      register: vmx_path_result
 
-    - name: Set old VM details
+    - name: Extract VMX directory
       set_fact:
-        vmid: "{{ old_vm_line.split()[0] }}"
-        current_vm_name: "{{ old_vm_line.split()[1] }}"
-        datastore_path: "{{ old_vm_line.split()[2].split(']')[0] + ']' }}"
-        target_vm_name: "{{ new_vm_name }}"
+        vmx_dir: "/vmfs/volumes/{{ vmx_path_result.stdout.split(']')[0] | regex_replace('\[|\]', '') }}/{{ vmx_path_result.stdout.split(']')[1] | regex_replace('^ ', '') | dirname }}"
 
-    - name: Take snapshot before rename (if enabled)
-      shell: vim-cmd vmsvc/snapshot.create {{ vmid }} "pre-rename-snap" "Snapshot before renaming" 0 0
-      when: snapshot_before
+    - name: Take snapshot (optional)
+      shell: "vim-cmd vmsvc/snapshot.create {{ vm_id }} {{ old_vm_name }}-backup-$(date +%Y%m%d%H%M%S) auto snapshot"
+      when: take_snapshot == 'true'
 
-    - name: Power off VM before renaming/unregistering
-      shell: vim-cmd vmsvc/power.off {{ vmid }}
+    - name: Power off VM
+      shell: "vim-cmd vmsvc/power.off {{ vm_id }}"
+      ignore_errors: true
 
-    - name: Rename or revert VM files (folder, VMDK, VMX)
+    - name: Unregister the VM
+      shell: "vim-cmd vmsvc/unregister {{ vm_id }}"
+
+    - name: Rename VM files (VMDK, VMX, NVRAM, VMSD, etc.)
       shell: |
-        SRC_DIR="/vmfs/volumes/{{ datastore_path | regex_replace('[\\[\\]]', '') }}/{{ current_vm_name }}"
-        DST_DIR="/vmfs/volumes/{{ datastore_path | regex_replace('[\\[\\]]', '') }}/{{ target_vm_name }}"
-
-        if [ ! -d "$SRC_DIR" ]; then
-          echo "Source directory $SRC_DIR doesn't exist, assuming already renamed. Skipping."
-          exit 0
-        fi
-
-        mv "$SRC_DIR" "$DST_DIR"
-
-        for f in "$DST_DIR"/*{{ current_vm_name }}*; do
-          mv "$f" "${f//${current_vm_name}/${target_vm_name}}"
+        for file in $(ls {{ vmx_dir }} | grep '{{ old_vm_name }}'); do
+          newfile=$(echo $file | sed "s/{{ old_vm_name }}/{{ new_vm_name }}/g")
+          mv {{ vmx_dir }}/$file {{ vmx_dir }}/$newfile
         done
 
-        sed -i "s/${current_vm_name}/${target_vm_name}/g" "$DST_DIR/${target_vm_name}.vmx"
-      register: rename_result
+    - name: Replace VM name in VMX config file
+      replace:
+        path: "{{ vmx_dir }}/{{ new_vm_name }}.vmx"
+        regexp: '{{ old_vm_name }}'
+        replace: '{{ new_vm_name }}'
 
-    - name: Unregister original VM
-      shell: vim-cmd vmsvc/unregister {{ vmid }}
-      register: unregister_result
-      failed_when: false
+    - name: Register renamed VM
+      shell: "vim-cmd solo/registervm {{ vmx_dir }}/{{ new_vm_name }}.vmx"
+      register: new_vmid
 
-    - name: Re-register renamed VM
-      shell: |
-        VMX_PATH="[{{ datastore_path | regex_replace('[\\[\\]]', '') }}]/{{ target_vm_name }}/{{ target_vm_name }}.vmx"
-        vim-cmd solo/registervm "$VMX_PATH"
-      when: unregister_result is succeeded or 'Powered on' in unregister_result.stderr
+    - name: Power on renamed VM
+      shell: "vim-cmd vmsvc/power.on {{ new_vmid.stdout }}"
+      when: operation == 'rename'
 
-    - name: Power on VM (if enabled)
-      shell: vim-cmd vmsvc/power.on $(vim-cmd vmsvc/getallvms | grep "{{ target_vm_name }}" | awk '{print $1}')
-      when: power_on
+    - name: Revert logic - restore files and re-register with original name
+      block:
+        - name: Power off current VM
+          shell: "vim-cmd vmsvc/power.off {{ new_vmid.stdout }}"
+          ignore_errors: true
 
-    - name: Final confirmation
-      debug:
-        msg: "Operation '{{ mode }}' completed successfully for VM '{{ target_vm_name }}'."
+        - name: Unregister renamed VM
+          shell: "vim-cmd vmsvc/unregister {{ new_vmid.stdout }}"
+
+        - name: Revert renamed files back to original
+          shell: |
+            for file in $(ls {{ vmx_dir }} | grep '{{ new_vm_name }}'); do
+              origfile=$(echo $file | sed "s/{{ new_vm_name }}/{{ old_vm_name }}/g")
+              mv {{ vmx_dir }}/$file {{ vmx_dir }}/$origfile
+            done
+
+        - name: Replace back VM name in VMX
+          replace:
+            path: "{{ vmx_dir }}/{{ old_vm_name }}.vmx"
+            regexp: '{{ new_vm_name }}'
+            replace: '{{ old_vm_name }}'
+
+        - name: Register reverted VM
+          shell: "vim-cmd solo/registervm {{ vmx_dir }}/{{ old_vm_name }}.vmx"
+          register: reverted_vmid
+
+        - name: Power on reverted VM
+          shell: "vim-cmd vmsvc/power.on {{ reverted_vmid.stdout }}"
+      when: operation == 'revert'
 
