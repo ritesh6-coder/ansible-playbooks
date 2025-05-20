@@ -6,34 +6,85 @@
     datastore_path: "/vmfs/volumes"
 
   tasks:
+    # Validate required extra vars (passed via AWX/CLI)
+    - name: Validate input variables
+      assert:
+        that:
+          - old_vm_name is defined and old_vm_name != ""
+          - new_vm_name is defined and new_vm_name != ""
+          - operation in ['rename', 'revert']
+        msg: "Required: old_vm_name, new_vm_name, and operation (rename/revert)."
+
+    # Get VM ID if registered
     - name: Get VM ID if registered
       shell: "vim-cmd vmsvc/getallvms | grep '{{ old_vm_name }}' | awk '{print $1}'"
       register: vm_id_result
       changed_when: false
+      ignore_errors: yes
 
-    - name: Set VM ID if available
+    # Set VM ID if available
+    - name: Set VM ID fact
       set_fact:
         vm_id: "{{ vm_id_result.stdout if vm_id_result.stdout != '' else None }}"
 
-    - name: Unregister old VM if registered
+    # Check VM power state (if registered)
+    - name: Get VM power state
+      when: vm_id is defined and vm_id != ''
+      shell: "vim-cmd vmsvc/power.getstate {{ vm_id }}"
+      register: vm_power_state
+      changed_when: false
+
+    # Power off VM if running (required for unregister)
+    - name: Power off VM if running
+      when: 
+        - vm_id is defined 
+        - vm_id != ''
+        - "'Powered on' in vm_power_state.stdout"
+      shell: "vim-cmd vmsvc/power.off {{ vm_id }}"
+      register: power_off_result
+      ignore_errors: yes
+
+    # Wait for VM to power off (retries every 5s, 10 times)
+    - name: Wait for VM to power off
+      when: 
+        - vm_id is defined 
+        - vm_id != ''
+        - "'Powered on' in vm_power_state.stdout"
+      shell: "vim-cmd vmsvc/power.getstate {{ vm_id }}"
+      register: power_state_check
+      until: "'Powered off' in power_state_check.stdout"
+      retries: 10
+      delay: 5
+      ignore_errors: yes
+
+    # Unregister VM (if registered)
+    - name: Unregister old VM
       when: vm_id is defined and vm_id != ''
       shell: "vim-cmd vmsvc/unregister {{ vm_id }}"
+      register: unregister_result
+      ignore_errors: yes
 
-    - name: Find full VMX path for old VM
+    # Find VMX file path (even if unregistered)
+    - name: Find VMX file for old VM
       shell: "find {{ datastore_path }} -type f -name '{{ old_vm_name }}.vmx'"
       register: vmx_path_result
       changed_when: false
 
-    - name: Set full VMX directory path
+    - name: Set VMX directory path
       set_fact:
         vmx_dir: "{{ vmx_path_result.stdout | dirname }}"
 
-    - name: Take snapshot (optional)
-      when: take_snapshot | default(false) | bool
-      shell: "vim-cmd vmsvc/snapshot.create {{ vm_id }} auto-snapshot-{{ '%Y%m%d%H%M%S' | strftime }} auto snapshot"
+    # Take snapshot (optional, only if VM was registered)
+    - name: Take snapshot (if enabled)
+      when: 
+        - take_snapshot | default(false) | bool
+        - vm_id is defined and vm_id != ''
+      shell: "vim-cmd vmsvc/snapshot.create {{ vm_id }} auto-snapshot-{{ '%Y%m%d%H%M%S' | strftime }}"
       ignore_errors: yes
 
-    - name: Rename VM folder and all internal files
+    # Rename VM folder/files (if operation=rename)
+    - name: Rename VM files and folder
+      when: operation == 'rename'
       shell: |
         old_dir="{{ vmx_dir }}"
         new_dir="{{ vmx_dir | dirname }}/{{ new_vm_name }}"
@@ -46,19 +97,30 @@
       args:
         executable: /bin/bash
 
-    - name: Update .vmx filename references
+    # Update VMX file references (if operation=rename)
+    - name: Update VMX file contents
+      when: operation == 'rename'
       shell: |
-        vmx_file="{{ datastore_path }}/{{ new_vm_name }}/{{ new_vm_name }}.vmx"
+        vmx_file="{{ vmx_dir | dirname }}/{{ new_vm_name }}/{{ new_vm_name }}.vmx"
         sed -i "s/{{ old_vm_name }}/{{ new_vm_name }}/g" "$vmx_file"
 
+    # Register renamed VM (if operation=rename)
     - name: Register renamed VM
-      shell: "vim-cmd solo/registervm {{ datastore_path }}/{{ new_vm_name }}/{{ new_vm_name }}.vmx"
+      when: operation == 'rename'
+      shell: "vim-cmd solo/registervm {{ vmx_dir | dirname }}/{{ new_vm_name }}/{{ new_vm_name }}.vmx"
+      register: register_result
+      ignore_errors: yes
 
-    - name: Output final VM list
+    # Debug output (final VM list)
+    - name: Get all VMs (debug)
       shell: vim-cmd vmsvc/getallvms
       register: all_vms
       changed_when: false
 
-    - debug:
-        var: all_vms.stdout
-
+    - name: Show results
+      debug:
+        msg: |
+          VM ID: {{ vm_id | default('Not registered') }}
+          Operation: {{ operation }}
+          New VM registered: {{ register_result is defined and register_result.rc == 0 }}
+          All VMs: {{ all_vms.stdout_lines }}
