@@ -61,6 +61,8 @@
         - name: Cleanup on validation failure
           debug:
             msg: "Validation failed - check VM files manually"
+        
+        - name: End play on validation failure
           meta: end_play
 
     # Take snapshot (if enabled and VM registered)
@@ -154,7 +156,6 @@
           shell: |
             new_vmx="{{ vmx_dir | dirname }}/{{ new_vm_name }}/{{ new_vm_name }}.vmx"
             sed -i "s/{{ old_vm_name }}/{{ new_vm_name }}/g" "$new_vmx"
-            # Ensure disk references are correct
             sed -i "s|/$(basename {{ vmx_dir }})/|/{{ new_vm_name }}/|g" "$new_vmx"
           args:
             executable: /bin/bash
@@ -186,6 +187,8 @@
         - name: Rename failure handler
           debug:
             msg: "Rename failed - check disk files manually"
+        
+        - name: End play on rename failure
           meta: end_play
 
     # Register renamed VM
