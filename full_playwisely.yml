@@ -109,5 +109,5 @@
       debug:
         msg: |
           Operation: {{ operation }}
-          Snapshot attempted: {{ snapshot_result is defined and snapshot_result.rc == 0 | default(false) }}
-          Rename status: {{ register_result is defined and register_result.rc == 0 | default(false) }}
+          VM renamed: {{ old_vm_name }} → {{ new_vm_name }}
+          New VM ID: {{ register_result.stdout | default('Not registered') }}
