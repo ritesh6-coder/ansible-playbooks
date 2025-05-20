@@ -1,0 +1,110 @@
+---
+- name: Rename ESXi VM with pre-checks and snapshot backup
+  hosts: 192.168.223.131
+  gather_facts: no
+  vars:
+    old_vm_name: "{{ vm_name }}"  # Input from AWX extra vars
+    new_vm_name: "{{ vm_name }}-renamed"
+    datastore_path: "/vmfs/volumes/datastore1"
+    old_folder_path: "{{ datastore_path }}/{{ old_vm_name }}"
+    new_folder_path: "{{ datastore_path }}/{{ new_vm_name }}"
+    vmx_file: "{{ new_folder_path }}/{{ old_vm_name }}.vmx"
+  tasks:
+
+    - name: Confirm SSH login success
+      shell: echo "Login successful to ESXi host {{ inventory_hostname }}"
+      register: login_message
+
+    - name: Show login success message
+      debug:
+        msg: "{{ login_message.stdout }}"
+
+    - name: Get all VMs list
+      shell: vim-cmd vmsvc/getallvms
+      register: all_vms_raw
+      changed_when: false
+
+    - name: Count total VMs on host
+      set_fact:
+        total_vms: "{{ all_vms_raw.stdout_lines | length - 1 }}"  # exclude header
+
+    - name: Show total VM count
+      debug:
+        msg: "Total VMs found on ESXi host: {{ total_vms }}"
+
+    - name: Get VM details matching old_vm_name
+      shell: vim-cmd vmsvc/getallvms | grep "{{ old_vm_name }}"
+      register: vm_match
+      failed_when: vm_match.rc != 0
+
+    - name: Show matched VM details
+      debug:
+        msg: "{{ vm_match.stdout }}"
+
+    - name: Extract VM ID from matched VM
+      set_fact:
+        vm_id: "{{ vm_match.stdout.split()[0] }}"
+
+    - name: Take snapshot of VM before rename
+      shell: vim-cmd vmsvc/snapshot.create {{ vm_id }} "pre-rename-backup" "Snapshot before VM rename" 0 0
+      register: snapshot_result
+
+    - name: Show snapshot creation result
+      debug:
+        msg: "{{ snapshot_result.stdout }}"
+
+    - name: Power off the VM if powered on
+      shell: |
+        if vim-cmd vmsvc/power.getstate {{ vm_id }} | grep -q "Powered on"; then
+          vim-cmd vmsvc/power.off {{ vm_id }}
+        else
+          echo "VM already powered off"
+        fi
+      register: poweroff_result
+
+    - name: Show power off result
+      debug:
+        msg: "{{ poweroff_result.stdout }}"
+
+    - name: Rename VM folder on datastore
+      shell: mv "{{ old_folder_path }}" "{{ new_folder_path }}"
+      register: mv_folder_result
+      failed_when: mv_folder_result.rc != 0 and "No such file or directory" not in mv_folder_result.stderr
+
+    - name: Show rename folder result
+      debug:
+        msg: "{{ mv_folder_result.stderr if mv_folder_result.rc != 0 else 'Folder renamed successfully' }}"
+
+    - name: Unregister the VM from ESXi
+      shell: vim-cmd vmsvc/unregister {{ vm_id }}
+      register: unregister_result
+
+    - name: Confirm VM unregistration
+      debug:
+        msg: "VM with ID {{ vm_id }} unregistered."
+
+    - name: Update displayName in VMX file
+      shell: |
+        sed -i 's/displayName = \".*\"/displayName = \"{{ new_vm_name }}\"/' "{{ vmx_file }}"
+      register: vmx_update_result
+
+    - name: Confirm VMX update
+      debug:
+        msg: "VMX displayName updated to {{ new_vm_name }}."
+
+    - name: Register the VM again with new name
+      shell: vim-cmd solo/registervm "{{ vmx_file }}"
+      register: register_result
+
+    - name: Show registration result
+      debug:
+        msg: "{{ register_result.stdout_lines }}"
+
+    - name: List all VMs after rename
+      shell: vim-cmd vmsvc/getallvms
+      register: vms_list
+
+    - name: Show current VMs on ESXi host
+      debug:
+        msg: "{{ vms_list.stdout_lines }}"
+

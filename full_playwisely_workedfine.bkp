@@ -1,0 +1,72 @@
+---
+- name: Fully rename an ESXi VM (folder + internal files)
+  hosts: 192.168.223.131
+  gather_facts: no
+  vars:
+    old_vm_name: "{{ vm_name }}"
+    new_vm_name: "{{ vm_name }}-renamed"
+    datastore: "datastore1"
+    datastore_path: "/vmfs/volumes/{{ datastore }}"
+    old_path: "{{ datastore_path }}/{{ old_vm_name }}"
+    new_path: "{{ datastore_path }}/{{ new_vm_name }}"
+  tasks:
+
+    - name: Get VM ID by name
+      shell: "vim-cmd vmsvc/getallvms | grep '{{ old_vm_name }}' | awk '{print $1}'"
+      register: vm_id_output
+      failed_when: vm_id_output.stdout == ""
+      changed_when: false
+
+    - name: Set VM ID
+      set_fact:
+        vm_id: "{{ vm_id_output.stdout.strip() }}"
+
+    - name: Take snapshot before renaming
+      shell: >
+        vim-cmd vmsvc/snapshot.create {{ vm_id }}
+        "pre-rename-backup" "Snapshot before full rename" 0 0
+
+    - name: Power off the VM if it's running
+      shell: >
+        if vim-cmd vmsvc/power.getstate {{ vm_id }} | grep -q "Powered on"; then
+          vim-cmd vmsvc/power.off {{ vm_id }}
+        fi
+
+    - name: Unregister VM from inventory
+      shell: vim-cmd vmsvc/unregister {{ vm_id }}
+
+    - name: Rename folder
+      shell: mv "{{ old_path }}" "{{ new_path }}"
+
+    - name: Rename internal VM files
+      shell: |
+        cd "{{ new_path }}"
+        for file in $(ls); do
+          newfile=$(echo "$file" | sed "s/{{ old_vm_name }}/{{ new_vm_name }}/g")
+          mv "$file" "$newfile"
+        done
+
+    - name: Update .vmx contents with new VM name
+      shell: |
+        sed -i 's/displayName = \".*\"/displayName = \"{{ new_vm_name }}\"/' "{{ new_path }}/{{ new_vm_name }}.vmx"
+        sed -i "s/{{ old_vm_name }}/{{ new_vm_name }}/g" "{{ new_path }}/{{ new_vm_name }}.vmx"
+
+    - name: Update .vmsd if exists
+      shell: |
+        if [ -f "{{ new_path }}/{{ new_vm_name }}.vmsd" ]; then
+          sed -i "s/{{ old_vm_name }}/{{ new_vm_name }}/g" "{{ new_path }}/{{ new_vm_name }}.vmsd"
+        fi
+      ignore_errors: true
+
+    - name: Register renamed VM
+      shell: vim-cmd solo/registervm "{{ new_path }}/{{ new_vm_name }}.vmx"
+
+    - name: List VMs to confirm rename
+      shell: vim-cmd vmsvc/getallvms
+      register: final_vm_list
+      changed_when: false
+
+    - name: Show VM list
+      debug:
+        msg: "{{ final_vm_list.stdout_lines }}"
+

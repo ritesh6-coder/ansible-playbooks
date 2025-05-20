@@ -1,0 +1,113 @@
+---
+- name: Rename or revert an ESXi VM completely (files + config)
+  hosts: 192.168.223.131
+  gather_facts: no
+  vars:
+    datastore_path: "/vmfs/volumes"
+
+  tasks:
+    # Validate input variables
+    - name: Validate input variables
+      assert:
+        that:
+          - old_vm_name is defined and old_vm_name != ""
+          - new_vm_name is defined and new_vm_name != ""
+          - operation in ['rename', 'revert']
+        msg: "Required: old_vm_name, new_vm_name, and operation (rename/revert)."
+
+    # Get VM ID if registered
+    - name: Get VM ID if registered
+      shell: "vim-cmd vmsvc/getallvms | grep '{{ old_vm_name }}' | awk '{print $1}'"
+      register: vm_id_result
+      changed_when: false
+      ignore_errors: yes
+
+    # Set VM ID fact
+    - name: Set VM ID fact
+      set_fact:
+        vm_id: "{{ vm_id_result.stdout if vm_id_result.stdout != '' else None }}"
+
+    # Take snapshot *before* unregistering (if enabled and VM exists)
+    - name: Take snapshot (if enabled)
+      when: 
+        - take_snapshot | default(false) | bool
+        - vm_id is defined and vm_id != ''
+      shell: "vim-cmd vmsvc/snapshot.create {{ vm_id }} auto-snapshot-{{ '%Y%m%d%H%M%S' | strftime }}"
+      register: snapshot_result
+      ignore_errors: yes
+
+    # Power off and unregister VM (if registered)
+    - block:
+        - name: Get VM power state
+          shell: "vim-cmd vmsvc/power.getstate {{ vm_id }}"
+          register: vm_power_state
+          changed_when: false
+
+        - name: Power off VM if running
+          when: "'Powered on' in vm_power_state.stdout"
+          shell: "vim-cmd vmsvc/power.off {{ vm_id }}"
+          register: power_off_result
+          ignore_errors: yes
+
+        - name: Wait for VM to power off
+          when: "'Powered on' in vm_power_state.stdout"
+          shell: "vim-cmd vmsvc/power.getstate {{ vm_id }}"
+          register: power_state_check
+          until: "'Powered off' in power_state_check.stdout"
+          retries: 10
+          delay: 5
+
+        - name: Unregister old VM
+          shell: "vim-cmd vmsvc/unregister {{ vm_id }}"
+          register: unregister_result
+          ignore_errors: yes
+      when: vm_id is defined and vm_id != ''
+
+    # Find VMX file path
+    - name: Find VMX file for old VM
+      shell: "find {{ datastore_path }} -type f -name '{{ old_vm_name }}.vmx'"
+      register: vmx_path_result
+      changed_when: false
+
+    - name: Set VMX directory path
+      set_fact:
+        vmx_dir: "{{ vmx_path_result.stdout | dirname }}"
+
+    # Rename files (use /bin/sh instead of /bin/bash)
+    - name: Rename VM files and folder
+      when: operation == 'rename'
+      shell: |
+        old_dir="{{ vmx_dir }}"
+        new_dir="{{ vmx_dir | dirname }}/{{ new_vm_name }}"
+        mv "$old_dir" "$new_dir"
+        cd "$new_dir"
+        for f in *{{ old_vm_name }}*; do
+          newf=$(echo "$f" | sed "s/{{ old_vm_name }}/{{ new_vm_name }}/g")
+          mv "$f" "$newf"
+        done
+      args:
+        executable: /bin/sh  # ESXi uses BusyBox (no bash)
+
+    # Update VMX file
+    - name: Update VMX file contents
+      when: operation == 'rename'
+      shell: |
+        vmx_file="{{ vmx_dir | dirname }}/{{ new_vm_name }}/{{ new_vm_name }}.vmx"
+        sed -i "s/{{ old_vm_name }}/{{ new_vm_name }}/g" "$vmx_file"
+      args:
+        executable: /bin/sh
+
+    # Register renamed VM
+    - name: Register renamed VM
+      when: operation == 'rename'
+      shell: "vim-cmd solo/registervm {{ vmx_dir | dirname }}/{{ new_vm_name }}/{{ new_vm_name }}.vmx"
+      register: register_result
+      ignore_errors: yes
+
+    # Debug output
+    - name: Show results
+      debug:
+        msg: |
+          Operation: {{ operation }}
+          VM renamed: {{ old_vm_name }} → {{ new_vm_name }}
+          New VM ID: {{ register_result.stdout | default('Not registered') }}

@@ -9,11 +9,10 @@
     old_vm_name: "linux-testmac"
     new_vm_name: "linux-test-renamed"
     validate_certs: false
-    datacenter: "ha-datacenter"  # Default datacenter for standalone ESXi
 
   tasks:
     - name: Verify ESXi connection
-      community.vmware.vmware_vm_info:
+      vmware_vm_info:
         hostname: "{{ esxi_host }}"
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
@@ -28,7 +27,7 @@
       tags: always
 
     - name: Get current VM info
-      community.vmware.vmware_vm_info:
+      vmware_vm_info:
         hostname: "{{ esxi_host }}"
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
@@ -43,18 +42,17 @@
       tags: check
 
     - name: Get detailed VM state
-      community.vmware.vmware_guest_info:
+      vmware_guest_info:
         hostname: "{{ esxi_host }}"
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
         validate_certs: "{{ validate_certs }}"
-        datacenter: "{{ datacenter }}"
         name: "{{ old_vm_name }}"
       register: detailed_vm_info
       tags: power
 
     - name: Power off VM if running
-      community.vmware.vmware_guest_powerstate:
+      vmware_guest_powerstate:
         hostname: "{{ esxi_host }}"
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
@@ -63,12 +61,11 @@
         name: "{{ old_vm_name }}"
         state: powered-off
       register: power_action
-      when: >
-        (vm_info.virtual_machines | selectattr('guest_name', 'equalto', old_vm_name) | first).power_state == 'poweredOn'
+      when: detailed_vm_info.instance.power_state == 'poweredOn'
       tags: power
 
     - name: Rename VM
-      community.vmware.vmware_guest:
+      vmware_guest:
         hostname: "{{ esxi_host }}"
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"
@@ -80,7 +77,7 @@
       tags: rename
 
     - name: Restore power state if changed
-      community.vmware.vmware_guest_powerstate:
+      vmware_guest_powerstate:
         hostname: "{{ esxi_host }}"
         username: "{{ vault_esxi_user }}"
         password: "{{ vault_esxi_pass }}"

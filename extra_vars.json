@@ -1,0 +1,8 @@
+{
+  "old_vm_name": "linux-renamed",
+  "new_vm_name": "linux-testmachine",
+  "mode": "rename",
+  "snapshot_before": false,
+  "power_on": true
+}
+
