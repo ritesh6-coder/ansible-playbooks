@@ -1,15 +1,16 @@
 ---
-- name: Ultra-Safe VM Rename Procedure
+- name: Safe VM Rename Procedure with Auto Power Management
   hosts: 192.168.223.131
   gather_facts: false
   vars:
-    datastore_path: "/vmfs/volumes"
-    safety_backup: true
-    max_retries: 3
+    datastore_name: "datastore1"  # CONFIGURE THIS TO YOUR DATASTORE
+    backup_root: "/vmfs/volumes/{{ datastore_name }}/vm_backups"
+    max_retries: 5
+    retry_delay: 10
 
   tasks:
-    # Phase 1: Pre-Flight Checks
-    - name: Validate VM exists and get ID
+    # Phase 1: Validate and Get VM Info
+    - name: Validate VM exists
       block:
         - name: Get VM ID
           shell: |
@@ -17,94 +18,111 @@
           register: vm_id_result
           changed_when: false
 
-        - name: Verify VM exists
+        - name: Fail if VM not found
           fail:
-            msg: "VM '{{ old_vm_name }}' not found in inventory"
+            msg: "VM '{{ old_vm_name }}' not found"
           when: vm_id_result.stdout == ""
+
+        - name: Set VM ID fact
+          set_fact:
+            vm_id: "{{ vm_id_result.stdout }}"
 
       rescue:
         - name: VM validation failed
           debug:
-            msg: "VM validation failed - cannot proceed"
-          # This must be a separate task
-          
-        - name: End play on validation failure
+            msg: "VM validation failed - check VM name"
           meta: end_play
 
-    # Phase 2: Power State Verification
+    # Phase 2: Power Management
     - name: Ensure VM is powered off
       block:
-        - name: Get power state
+        - name: Get current power state
           shell: |
-            vim-cmd vmsvc/power.getstate {{ vm_id_result.stdout }} | grep -oE 'Powered (on|off)'
+            vim-cmd vmsvc/power.getstate {{ vm_id }} | grep -oE 'Powered (on|off)'
           register: power_state
           changed_when: false
 
-        - name: Require powered off state
-          fail:
-            msg: "VM must be powered off before rename. Current state: {{ power_state.stdout }}"
+        - name: Shutdown if powered on
           when: "'Powered on' in power_state.stdout"
+          shell: |
+            vim-cmd vmsvc/power.shutdown {{ vm_id }}
+          register: shutdown_cmd
+          ignore_errors: true
+
+        - name: Wait for shutdown
+          when: "'Powered on' in power_state.stdout"
+          shell: |
+            for i in {1..30}; do
+              state=$(vim-cmd vmsvc/power.getstate {{ vm_id }} | grep -oE 'Powered (on|off)')
+              [ "$state" = "Powered off" ] && exit 0
+              sleep 2
+            done
+            exit 1
+          args:
+            executable: /bin/sh
+          register: shutdown_wait
+          retries: "{{ max_retries }}"
+          delay: "{{ retry_delay }}"
+          until: shutdown_wait.rc == 0
+
+        - name: Final power state check
+          fail:
+            msg: "Failed to power off VM after {{ max_retries * retry_delay }} seconds"
+          when: shutdown_wait is defined and shutdown_wait.rc != 0
 
       rescue:
-        - name: Power state check failed
+        - name: Power management failed
           debug:
-            msg: "Power state verification failed"
-          
-        - name: End play on power state failure
+            msg: "Power off procedure failed - manual intervention required"
           meta: end_play
 
     # Phase 3: Safety Backup
-    - name: Create safety backup
-      when: safety_backup | bool
+    - name: Create backup
       block:
         - name: Create backup directory
-          file:
-            path: "/vmfs/volumes/{{ datastore_path }}/vm_backups/{{ old_vm_name }}_backup"
-            state: directory
-            mode: '0755'
-
-        - name: Copy all files to backup
           shell: |
-            cp -rp "{{ vmx_dir }}" "/vmfs/volumes/{{ datastore_path }}/vm_backups/{{ old_vm_name }}_backup/"
+            mkdir -p "{{ backup_root }}/{{ old_vm_name }}_backup"
+            chmod 755 "{{ backup_root }}/{{ old_vm_name }}_backup"
+          args:
+            executable: /bin/sh
+
+        - name: Copy VM files to backup
+          shell: |
+            cp -rp "{{ vmx_dir }}/." "{{ backup_root }}/{{ old_vm_name }}_backup/"
           args:
             executable: /bin/sh
           register: backup_result
-          retries: "{{ max_retries }}"
-          delay: 10
-          until: backup_result.rc == 0
+          retries: 3
+          delay: 5
 
       rescue:
-        - name: Backup failed handler
+        - name: Backup failed
           debug:
-            msg: "Backup failed - aborting operation"
-          
-        - name: End play on backup failure
+            msg: "Backup failed - original files preserved"
           meta: end_play
 
     # Phase 4: Rename Operation
-    - name: Execute rename operation
+    - name: Perform rename
       block:
         - name: Create new directory
-          file:
-            path: "{{ vmx_dir | dirname }}/{{ new_vm_name }}"
-            state: directory
-            mode: '0755'
-
-        - name: Copy files with rename
           shell: |
-            set -e
-            old_dir="{{ vmx_dir }}"
-            new_dir="{{ vmx_dir | dirname }}/{{ new_vm_name }}"
-            for f in "$old_dir"/*; do
-              [ -f "$f" ] || continue
-              newname=$(basename "$f" | sed "s/{{ old_vm_name }}/{{ new_vm_name }}/g")
-              cp -np "$f" "$new_dir/$newname"
-            done
+            mkdir -p "{{ vmx_dir | dirname }}/{{ new_vm_name }}"
+            chmod 755 "{{ vmx_dir | dirname }}/{{ new_vm_name }}"
+          args:
+            executable: /bin/sh
+
+        - name: Copy and rename files
+          shell: |
+            find "{{ vmx_dir }}" -type f -exec sh -c '
+              new_path="{{ vmx_dir | dirname }}/{{ new_vm_name }}/$(basename "$1" | sed "s/{{ old_vm_name }}/{{ new_vm_name }}/g")"
+              cp -np "$1" "$new_path"
+              chmod $(stat -c "%a" "$1") "$new_path"
+            ' _ {} \;
           args:
             executable: /bin/sh
           register: copy_result
-          retries: "{{ max_retries }}"
-          delay: 15
+          retries: 3
+          delay: 5
 
         - name: Update VMDK descriptors
           shell: |
@@ -125,15 +143,13 @@
             executable: /bin/sh
 
       rescue:
-        - name: Rename operation failed
+        - name: Rename failed
           debug:
-            msg: "Rename failed - original files remain intact in {{ vmx_dir }}"
-          
-        - name: End play on rename failure
+            msg: "Rename failed - backup available at {{ backup_root }}"
           meta: end_play
 
-    # Phase 5: Registration
-    - name: Register renamed VM
+    # Phase 5: Registration and Verification
+    - name: Register new VM
       block:
         - name: Register VM
           shell: |
@@ -149,16 +165,13 @@
       rescue:
         - name: Registration failed
           debug:
-            msg: "Registration failed - you can manually register from backup"
-          
-        - name: End play on registration failure
+            msg: "Registration failed - use backup to restore: {{ backup_root }}"
           meta: end_play
 
-    # Completion
-    - name: Show success message
+    # Final Success
+    - name: Completion message
       debug:
         msg: |
-          RENAME SUCCESSFUL!
-          New VM: {{ new_vm_name }}
-          VM ID: {{ register_result.stdout }}
-          Backup kept at: /vmfs/volumes/{{ datastore_path }}/vm_backups/{{ old_vm_name }}_backup/
+          SUCCESS! VM renamed to {{ new_vm_name }}
+          New VM ID: {{ register_result.stdout }}
+          Backup Location: {{ backup_root }}/{{ old_vm_name }}_backup
