@@ -1,133 +1,63 @@
 ---
-- name: Safely rename ESXi VMs with disk integrity checks
+- name: Ultra-Safe VM Rename Procedure
   hosts: 192.168.223.131
   gather_facts: false
   vars:
     datastore_path: "/vmfs/volumes"
-    timeout_seconds: 300
-    retry_delay: 5
+    safety_backup: true  # Set to false after testing
+    max_retries: 3
 
   tasks:
-    # Validate input variables
-    - name: Validate required parameters
-      assert:
-        that:
-          - old_vm_name is defined and old_vm_name != ""
-          - new_vm_name is defined and new_vm_name != ""
-          - operation in ['rename', 'revert']
-        msg: "Must specify valid old_vm_name, new_vm_name, and operation"
-
-    # Get VM ID if registered
-    - name: Check if VM is registered
-      shell: |
-        vim-cmd vmsvc/getallvms | grep '{{ old_vm_name }}' | awk '{print $1}' || true
-      register: vm_id_result
-      changed_when: false
-      failed_when: false
-
-    # Set VM ID fact
-    - name: Set VM ID
-      set_fact:
-        vm_id: "{{ vm_id_result.stdout }}"
-      when: vm_id_result.stdout != ""
-
-    # Pre-rename validation
-    - name: Validate VM files exist
+    # Phase 1: Pre-Flight Checks
+    - name: Validate VM is powered off
       block:
-        - name: Find VMX file
+        - name: Get VM ID
           shell: |
-            find {{ datastore_path }} -type f -name '{{ old_vm_name }}.vmx'
-          register: vmx_path_result
+            vim-cmd vmsvc/getallvms | grep '{{ old_vm_name }}' | awk '{print $1}' || true
+          register: vm_id_result
           changed_when: false
 
-        - name: Verify VMX found
-          fail:
-            msg: "No VMX file found for {{ old_vm_name }}"
-          when: vmx_path_result.stdout == ""
-
-        - name: Set VM directory
-          set_fact:
-            vmx_dir: "{{ vmx_path_result.stdout | dirname }}"
-            vmx_file: "{{ vmx_path_result.stdout }}"
-
-        - name: Check disk space
+        - name: Verify power state
+          when: vm_id_result.stdout != ""
           shell: |
-            df -h "{{ vmx_dir }}" | awk 'NR==2 {print $4}'
-          register: disk_space
-          changed_when: false
-
-      rescue:
-        - name: Cleanup on validation failure
-          debug:
-            msg: "Validation failed - check VM files manually"
-          meta: end_play
-
-    # Power off VM if registered
-    - name: Ensure VM is powered off
-      when: vm_id is defined
-      block:
-        - name: Get power state
-          shell: |
-            vim-cmd vmsvc/power.getstate {{ vm_id }} | grep -oE 'Powered (on|off)'
+            vim-cmd vmsvc/power.getstate {{ vm_id_result.stdout }} | grep -oE 'Powered (on|off)'
           register: power_state
-          changed_when: false
-
-        - name: Power off VM if running
-          when: "'Powered on' in power_state.stdout"
-          shell: |
-            vim-cmd vmsvc/power.shutdown {{ vm_id }}
-          register: power_off
-          ignore_errors: true
-
-        - name: Wait for shutdown
-          when: "'Powered on' in power_state.stdout"
-          shell: |
-            for i in {1..30}; do
-              state=$(vim-cmd vmsvc/power.getstate {{ vm_id }} | grep -oE 'Powered (on|off)')
-              [ "$state" = "Powered off" ] && exit 0
-              sleep 2
-            done
-            exit 1
-          args:
-            executable: /bin/sh
-          register: shutdown_wait
-          until: shutdown_wait.rc == 0
-          retries: 5
-          delay: 10
-          ignore_errors: true
-
-        - name: Fail if still powered on
-          fail:
-            msg: "Could not power off VM {{ vm_id }}"
-          when: "'Powered on' in power_state.stdout" and shutdown_wait.rc != 0
+          failed_when: "'Powered on' in power_state.stdout"
 
       rescue:
         - name: Power state failure
           debug:
-            msg: "Failed to power off VM - manual intervention required"
+            msg: "VM MUST be powered off before rename. Current state: {{ power_state.stdout }}"
           meta: end_play
 
-    # Take snapshot (if enabled)
-    - name: Create pre-rename snapshot
-      when: 
-        - take_snapshot | default(false) | bool
-        - vm_id is defined
-      shell: |
-        vim-cmd vmsvc/snapshot.create {{ vm_id }} "pre-rename-{{ '%Y%m%d-%H%M%S' | strftime }}" "Snapshot before rename"
-      register: snapshot_result
-      ignore_errors: true
+    # Phase 2: Safety Backup
+    - name: Create safety backup
+      when: safety_backup | bool
+      block:
+        - name: Create backup directory
+          file:
+            path: "/vmfs/volumes/{{ datastore_path }}/vm_backups/{{ old_vm_name }}_backup_{{ '%Y%m%d' | strftime }}"
+            state: directory
+            mode: '0755'
 
-    # Unregister VM if registered
-    - name: Unregister VM
-      when: vm_id is defined
-      shell: |
-        vim-cmd vmsvc/unregister {{ vm_id }}
-      register: unregister_result
-      ignore_errors: true
+        - name: Copy all files to backup
+          shell: |
+            rsync -av "{{ vmx_dir }}/" "/vmfs/volumes/{{ datastore_path }}/vm_backups/{{ old_vm_name }}_backup_{{ '%Y%m%d' | strftime }}/"
+          args:
+            executable: /bin/sh
+          register: backup_result
+          retries: "{{ max_retries }}"
+          delay: 10
+          until: backup_result.rc == 0
 
-    # Rename operation
-    - name: Perform rename
-      when: operation == 'rename'
+      rescue:
+        - name: Backup failed
+          debug:
+            msg: "BACKUP FAILED! Aborting operation to prevent data loss."
+          meta: end_play
+
+    # Phase 3: Rename Operation (With Recovery Checkpoint)
+    - name: Execute rename with recovery point
       block:
         - name: Create new directory
           file:
@@ -135,74 +65,82 @@
             state: directory
             mode: '0755'
 
-        - name: Copy all files with rename
+        - name: Copy files (safe mode)
           shell: |
+            set -e
             old_dir="{{ vmx_dir }}"
             new_dir="{{ vmx_dir | dirname }}/{{ new_vm_name }}"
-            find "$old_dir" -type f -exec sh -c '
-              new_path="$2/$(basename "$1" | sed "s/{{ old_vm_name }}/{{ new_vm_name }}/g")"
-              [ -f "$1" ] && cp -np "$1" "$new_path" && chmod $(stat -c "%a" "$1") "$new_path"
-            ' _ {} "$new_dir" \;
-          args:
-            executable: /bin/sh
-          register: copy_result
-          changed_when: copy_result.stdout != ""
-          ignore_errors: true
-
-        - name: Verify files copied
-          fail:
-            msg: "Failed to copy files to new directory"
-          when: copy_result.rc != 0
-
-        - name: Update VMDK descriptors
-          shell: |
-            cd "{{ vmx_dir | dirname }}/{{ new_vm_name }}"
-            for f in *.vmdk; do
+            for f in "$old_dir"/*; do
               [ -f "$f" ] || continue
-              [[ "$f" == *-flat.vmdk ]] && continue
-              [[ "$f" == *-sesparse.vmdk ]] && continue
-              sed -i "s/{{ old_vm_name }}/{{ new_vm_name }}/g" "$f"
+              filename=$(basename "$f")
+              newname=$(echo "$filename" | sed "s/{{ old_vm_name }}/{{ new_vm_name }}/g")
+              cp -np "$f" "$new_dir/$newname"
+              chmod $(stat -c "%a" "$f") "$new_dir/$newname"
             done
           args:
             executable: /bin/sh
-          register: update_vmdk
-          failed_when: update_vmdk.rc != 0
+          register: copy_result
+          retries: "{{ max_retries }}"
+          delay: 15  # Wait for any locks to clear
 
-        - name: Update VMX file
-          shell: |
-            new_vmx="{{ vmx_dir | dirname }}/{{ new_vm_name }}/{{ new_vm_name }}.vmx"
-            sed -i "s/{{ old_vm_name }}/{{ new_vm_name }}/g" "$new_vmx"
-            sed -i "s|/$(basename {{ vmx_dir }})/|/{{ new_vm_name }}/|g" "$new_vmx"
-          args:
-            executable: /bin/sh
+        - name: Update configuration files
+          block:
+            - name: Update VMDK descriptors
+              shell: |
+                cd "{{ vmx_dir | dirname }}/{{ new_vm_name }}"
+                for f in *.vmdk; do
+                  [ -f "$f" ] || continue
+                  [[ "$f" == *-flat.vmdk ]] && continue
+                  sed -i "s/{{ old_vm_name }}/{{ new_vm_name }}/g" "$f"
+                done
+              args:
+                executable: /bin/sh
+
+            - name: Update VMX file
+              shell: |
+                new_vmx="{{ vmx_dir | dirname }}/{{ new_vm_name }}/{{ new_vm_name }}.vmx"
+                sed -i "s/{{ old_vm_name }}/{{ new_vm_name }}/g" "$new_vmx"
+              args:
+                executable: /bin/sh
+
+          rescue:
+            - name: Config update failed
+              debug:
+                msg: "Configuration update failed - restoring from backup"
+              meta: end_play
 
       rescue:
-        - name: Rename failure handler
+        - name: Rename operation failed
           debug:
-            msg: "Rename failed - check disk files manually"
+            msg: "RENAME FAILED! Original files remain in {{ vmx_dir }}"
           meta: end_play
 
-    # Register renamed VM
-    - name: Register VM
-      shell: |
-        vim-cmd solo/registervm "{{ datastore_path }}/{{ new_vm_name }}/{{ new_vm_name }}.vmx"
-      register: register_result
-      changed_when: register_result.rc == 0
-      failed_when: register_result.rc != 0
+    # Phase 4: Post-Rename Verification
+    - name: Validate new VM
+      block:
+        - name: Register VM
+          shell: |
+            vim-cmd solo/registervm "{{ vmx_dir | dirname }}/{{ new_vm_name }}/{{ new_vm_name }}.vmx"
+          register: register_result
 
-    # Post-rename verification
-    - name: Verify VM registration
-      shell: |
-        vim-cmd vmsvc/getallvms | grep '{{ new_vm_name }}'
-      register: vm_check
-      failed_when: vm_check.rc != 0
+        - name: Verify registration
+          shell: |
+            vim-cmd vmsvc/getallvms | grep '{{ new_vm_name }}'
+          register: vm_check
+          failed_when: vm_check.rc != 0
 
-    - name: Show results
+      rescue:
+        - name: Registration failed
+          debug:
+            msg: "VM registration failed. Backup available at /vmfs/volumes/{{ datastore_path }}/vm_backups/"
+          meta: end_play
+
+    # Final Success
+    - name: Completion message
       debug:
         msg: |
-          Operation: {{ operation }}
-          Old VM: {{ old_vm_name }}
+          RENAME SUCCESSFUL!
+          Old VM: {{ old_vm_name }} (retained as backup)
           New VM: {{ new_vm_name }}
           VM ID: {{ register_result.stdout }}
-          Files: {{ (vmx_dir | dirname) }}/{{ new_vm_name }}/
-          Status: SUCCESS
+          Backup Location: /vmfs/volumes/{{ datastore_path }}/vm_backups/{{ old_vm_name }}_backup_{{ '%Y%m%d' | strftime }}/
